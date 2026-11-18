@@ -45,16 +45,19 @@ from langgraph_events._event import (
     MaxRoundsExceeded,
     Resumed,
     Scatter,
+    SeededAnswer,
 )
 from langgraph_events._event_log import EventLog
 from langgraph_events._handler import BoundHandler, HandlerMeta  # noqa: TC001
 from langgraph_events._inputs import NodeCall
 from langgraph_events._pause import _pause_budget, _PauseBudget
 from langgraph_events._reducer import StateRead
+from langgraph_events._run_signals import ResumeStoppedError
 from langgraph_events._stop import (
     STOPPED_HANDLERS,
     add_or_clear,
     cancelled_on_signal,
+    replay_is_stopped,
     run_step,
     stop_is_set,
 )
@@ -854,6 +857,8 @@ def make_handler_node(
                     {"events": [], "causes": [], STOPPED_HANDLERS: [meta.name]}
                 )
         except asyncio.CancelledError:
+            if replay_is_stopped(config):
+                raise ResumeStoppedError from None
             return _finalize(pad_causes({"events": [Cancelled()]}, FRAMEWORK))
         finally:
             _reset_custom_emitters(tokens)
@@ -907,7 +912,16 @@ def _collect_and_check(
     a single ``InvariantViolated`` carrying ``would_emit``.
     """
     pre_len = len(new_events)
-    _collect_result(result, new_events, lg_interrupt, meta, return_contract)
+    seeds: list[Event] = []
+
+    def answer_of(question: Event) -> object:
+        value = lg_interrupt(question)
+        if isinstance(value, SeededAnswer):
+            seeds.extend(value.seeds)
+            return value.answer
+        return value
+
+    _collect_result(result, new_events, answer_of, meta, return_contract)
     emitted = new_events[pre_len:]
     pending_causes = list(new_causes)
     _record_causes(pending_causes, new_events, trigger, meta.node_name)
@@ -917,6 +931,12 @@ def _collect_and_check(
     if violation is not None:
         del new_events[pre_len:]
         new_events.append(violation)
+    if seeds:
+        # The seeds of the resume come from outside, so they have no cause.
+        # They go before the answer, as the seeds of a fresh run go first.
+        _record_causes(new_causes, new_events, trigger, meta.node_name)
+        new_events[pre_len:pre_len] = seeds
+        new_causes[pre_len:pre_len] = [None] * len(seeds)
 
 
 def _assert_no_private_leak(result: Event | Scatter, meta: HandlerMeta | None) -> None:

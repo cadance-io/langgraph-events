@@ -12,11 +12,31 @@ from langgraph_events._pause import (
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
+    from langgraph.types import StateSnapshot
 
     from langgraph_events._types import PauseSignal
 
 
 _STOP_SIGNAL_KEY = f"{_FRAMEWORK_KEY_PREFIX}stop_signal"
+
+
+class ResumeStoppedError(RuntimeError):
+    """The ``stop_on=`` signal stopped a resume before it applied its answers.
+
+    The signal was set at the call, or while the resume replayed the paused
+    handlers. Each cut question stays open, with the same interrupt id, and
+    the resume stores no answer for it. A replay that ended before the stop
+    keeps its answer. The resume stores no seed.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "stop_on= was set before the resume applied its answers. The thread "
+            "stays paused on its questions."
+        )
+
+
+_REPLAY_STEP_KEY = f"{_FRAMEWORK_KEY_PREFIX}replay_step"
 
 
 class SignalLatch:
@@ -48,6 +68,17 @@ def stop_signal(config: RunnableConfig | None) -> SignalLatch | None:
     return signal
 
 
+def is_replay(config: RunnableConfig | None) -> bool:
+    """Whether the step of *config* replays the paused handler of a resume.
+
+    A resume replays only the paused handlers, all in its first step.
+    """
+    conf = config or {}
+    replay_step = conf.get("configurable", {}).get(_REPLAY_STEP_KEY)
+    step = conf.get("metadata", {}).get("langgraph_step")
+    return replay_step is not None and step == replay_step
+
+
 @dataclasses.dataclass(frozen=True)
 class _RunSignals:
     """The ``deadline=``, ``pause_on=`` and ``stop_on=`` of one run call.
@@ -60,6 +91,7 @@ class _RunSignals:
     deadline: float | None
     pause_on: PauseSignal | None
     stop_on: PauseSignal | None
+    replay_step: int | None = None
 
     def __post_init__(self) -> None:
         for name, signal in (("pause_on", self.pause_on), ("stop_on", self.stop_on)):
@@ -74,14 +106,26 @@ class _RunSignals:
                     f"the Event class."
                 )
 
-    def refuse_set_stop(self) -> None:
-        """Raise ``ValueError`` when ``stop_on=`` is already set at a resume."""
-        if self.stop_on is not None and self.stop_on.is_set():
-            raise ValueError(
-                "stop_on= is already set, so the resume would lose the question "
-                "and the answer. Pass a stop_on= that is not set, or abandon() "
-                "the thread."
-            )
+    def refuse_set_stop(self, config: RunnableConfig | None) -> None:
+        """Raise :class:`ResumeStoppedError` when a stop is set at a resume.
+
+        The stop is ``stop_on=``, or a latch that the caller put in *config*.
+        """
+        if (self.stop_on is not None and self.stop_on.is_set()) or (
+            (latch := stop_signal(config)) is not None and latch.is_set()
+        ):
+            raise ResumeStoppedError
+
+    def for_resume(self, snapshot: StateSnapshot | None) -> _RunSignals:
+        """These signals for the resume of *snapshot*.
+
+        The resume replays the paused handlers in the step after *snapshot*.
+        A thread with no open interrupt has no paused handler to replay, for
+        example after a failed run, so the signals come back unchanged.
+        """
+        if snapshot is None or snapshot.metadata is None or not snapshot.interrupts:
+            return self
+        return dataclasses.replace(self, replay_step=snapshot.metadata["step"] + 1)
 
     def apply(self, config: RunnableConfig | None) -> RunnableConfig:
         """Return *config* with the run's pause budget and stop signal.
@@ -98,6 +142,8 @@ class _RunSignals:
             )
         if self.stop_on is not None:
             added[_STOP_SIGNAL_KEY] = SignalLatch(self.stop_on)
+        if self.replay_step is not None:
+            added[_REPLAY_STEP_KEY] = self.replay_step
         if not added:
             return config or {}
         out: dict[str, Any] = dict(config or {})

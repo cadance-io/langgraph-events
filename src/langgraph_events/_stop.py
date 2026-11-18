@@ -14,10 +14,10 @@ from langgraph_events._event import (
     Halted,
     HandlerCutOnSignal,
 )
-from langgraph_events._run_signals import stop_signal
+from langgraph_events._run_signals import ResumeStoppedError, is_replay, stop_signal
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine
+    from collections.abc import Coroutine, Mapping
 
     from langchain_core.runnables import RunnableConfig
     from langgraph.types import StateSnapshot
@@ -78,11 +78,25 @@ def stop_is_set(config: RunnableConfig | None) -> bool:
     return stop is not None and stop.is_set()
 
 
+def replay_is_stopped(config: RunnableConfig) -> bool:
+    """Whether the stop of the run cut the replay step of *config*.
+
+    LangGraph cancels each sibling of a step that raised. The sibling replay
+    of a stopped resume must then also fail, so that it stores nothing.
+    """
+    return is_replay(config) and stop_is_set(config)
+
+
 async def run_step(work: Coroutine[Any, Any, None], config: RunnableConfig) -> bool:
     """Run *work*, and cancel it when the run's ``stop_on=`` is set.
 
     The cancel goes to *work* only, so it never reaches a checkpoint write.
     Returns whether the stop cut *work*.
+
+    Raises:
+        ResumeStoppedError: the stop cut the replay of a paused handler. The
+            step then fails, so LangGraph commits no checkpoint, and the
+            thread stays paused on its question.
     """
     stop = stop_signal(config)
     if stop is None:
@@ -96,6 +110,13 @@ async def run_step(work: Coroutine[Any, Any, None], config: RunnableConfig) -> b
         await _cancel_until_done(task)
         raise
     if stop.is_set():
+        if is_replay(config):
+            if task.done():
+                # The replay applied its answer before the stop.
+                task.result()
+                return False
+            await _cancel_until_done(task)
+            raise ResumeStoppedError
         await _cancel_until_done(task)
         return True
     task.result()
@@ -131,16 +152,42 @@ def _cut_records(snapshot: StateSnapshot | None) -> list[Event]:
     ]
 
 
-def resume_command(value: Event, snapshot: StateSnapshot | None) -> LGCommand:
+type ResumeValue = Event | Mapping[str, Event]
+"""One answer for the one open interrupt, or answers by LangGraph interrupt id."""
+
+
+def resume_command(value: ResumeValue, snapshot: StateSnapshot | None) -> LGCommand:
     """The input that resumes *snapshot* with *value*.
 
     It also stores a :class:`HandlerCutOnSignal` for each handler that the
-    stop cut in the paused round.
+    stop cut in the paused round. The record states a fact of that round, so
+    it stays when a stop cuts this resume, and a later resume does not store
+    it again. An open interrupt that the answers by id do not name stays
+    open.
+
+    Raises:
+        ValueError: *value* maps an id that names no open interrupt of
+            *snapshot*.
     """
+    resume = value if isinstance(value, Event) else _answers_by_id(value, snapshot)
     cuts = _cut_records(snapshot)
     if not cuts:
-        return LGCommand(resume=value)
-    return LGCommand(resume=value, update=pad_causes({"events": cuts}, FRAMEWORK))
+        return LGCommand(resume=resume)
+    return LGCommand(resume=resume, update=pad_causes({"events": cuts}, FRAMEWORK))
+
+
+def _answers_by_id(
+    answers: Mapping[str, Event], snapshot: StateSnapshot | None
+) -> dict[str, Event]:
+    if snapshot is not None:
+        open_ids = [i.id for task in snapshot.tasks for i in task.interrupts]
+        unknown = sorted(set(answers) - set(open_ids))
+        if unknown:
+            raise ValueError(
+                f"resume() answers the ids {unknown!r}, which name no open "
+                f"interrupt. The open interrupt ids are {open_ids!r}."
+            )
+    return dict(answers)
 
 
 def cancelled_on_signal(

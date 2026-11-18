@@ -2,16 +2,18 @@
 
 import json
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from functools import cache
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ag_ui.core import (
     BaseEvent,
     CustomEvent,
     EventType,
     InputContentPart,
+    Interrupt,
     MessagesSnapshotEvent,
+    RunFinishedInterruptOutcome,
     StateSnapshotEvent,
     TextPart,
     ToolCallArgsEvent,
@@ -23,6 +25,7 @@ from pydantic import BaseModel, NonNegativeInt, TypeAdapter, ValidationError
 
 from langgraph_events._event import (
     CancelledOnSignal,
+    Dismissed,
     Event,
     Interrupted,
     Resumed,
@@ -472,8 +475,8 @@ def _langchain_to_agui_messages(
 
 
 class SkipInternalMapper:
-    """Suppress framework-internal events (Resumed, SystemPromptSet,
-    FrontendStateMutated).
+    """Suppress framework-internal events (Resumed, Dismissed,
+    SystemPromptSet, FrontendStateMutated).
 
     ``FrontendStateMutated`` originates from the client — echoing it back
     over the wire is redundant.  Its downstream reducer changes surface
@@ -481,7 +484,9 @@ class SkipInternalMapper:
     """
 
     def map(self, event: Event, ctx: MapperContext) -> list[BaseEvent] | None:
-        if isinstance(event, (Resumed, SystemPromptSet, FrontendStateMutated)):
+        if isinstance(
+            event, (Resumed, Dismissed, SystemPromptSet, FrontendStateMutated)
+        ):
             return []
         return None
 
@@ -531,23 +536,52 @@ class InterruptedMapper:
     def map(self, event: Event, ctx: MapperContext) -> list[BaseEvent] | None:
         if not isinstance(event, Interrupted):
             return None
-        if isinstance(event, InterruptedWithPayload):
-            return [
-                CustomEvent(
-                    type=EventType.CUSTOM,
-                    name="interrupted",
-                    value=event.interrupt_payload(),
-                )
-            ]
-        if not isinstance(event, AGUISerializable):
+        if not _has_payload(event):
             return _handle_unmapped(type(event), self._on_unmapped)
         return [
             CustomEvent(
                 type=EventType.CUSTOM,
                 name="interrupted",
-                value=event.agui_dict(),
+                value=_payload(event),
             )
         ]
+
+
+def _has_payload(event: object) -> bool:
+    return isinstance(event, (InterruptedWithPayload, AGUISerializable))
+
+
+def _payload(event: object) -> Any:  # noqa: ANN401 - the payload of the app
+    """The AG-UI payload of *event*. Call it only when ``_has_payload``."""
+    if isinstance(event, InterruptedWithPayload):
+        return event.interrupt_payload()
+    return cast("AGUISerializable", event).agui_dict()
+
+
+def interrupt_outcome(
+    pending: Iterable[tuple[str, object]],
+) -> RunFinishedInterruptOutcome | None:
+    """The outcome of a run that leaves *pending* open, or ``None``.
+
+    *pending* holds the LangGraph id and the value of each open interrupt.
+    The reason of an interrupt is the class name of its value. Its metadata
+    holds the payload of the ``interrupted`` custom event, when the value has
+    one. A ``FrontendToolCallRequested`` is a frontend tool call, not an
+    interrupt. AG-UI 1.0 ends such a run as a success, so it is not in the
+    outcome.
+    """
+    interrupts = [
+        Interrupt(
+            id=interrupt_id,
+            reason=type(value).__name__,
+            metadata={"payload": _payload(value)} if _has_payload(value) else None,
+        )
+        for interrupt_id, value in pending
+        if not isinstance(value, FrontendToolCallRequested)
+    ]
+    if not interrupts:
+        return None
+    return RunFinishedInterruptOutcome(interrupts=interrupts)
 
 
 class _CancelledOnSignalMapper:

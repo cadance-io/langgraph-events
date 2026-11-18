@@ -15,6 +15,7 @@ from ag_ui.core import (
     RunErrorEvent,
     RunFinishedCancelledOutcome,
     RunFinishedEvent,
+    RunFinishedInterruptOutcome,
     RunStartedEvent,
     TextMessageContentEvent,
     TextMessageEndEvent,
@@ -27,7 +28,7 @@ from ag_ui.core import (
 from langgraph_events._event import CancelledOnSignal, Event, Interrupted
 from langgraph_events._graph import _snapshot_interrupts
 from langgraph_events._pause import _FRAMEWORK_KEY_PREFIX
-from langgraph_events._run_signals import _RunSignals
+from langgraph_events._run_signals import ResumeStoppedError, _RunSignals
 from langgraph_events.stream import (
     CustomEventFrame,
     InterruptFrame,
@@ -41,7 +42,7 @@ from langgraph_events.stream import (
 
 from ._context import MapperContext
 from ._errors import RunRefusedError
-from ._events import FrontendStateMutated
+from ._events import FrontendStateMutated, FrontendToolCallRequested
 from ._mappers import (
     FallbackMapper,
     UnmappedEventError,
@@ -49,7 +50,9 @@ from ._mappers import (
     build_messages_snapshot,
     build_state_snapshot,
     default_mappers,
+    interrupt_outcome,
 )
+from ._resume import answers_by_interrupt_id
 from ._state import _DEDICATED_EVENT_KEYS, _default_state_projection
 
 logger = logging.getLogger(__name__)
@@ -75,6 +78,7 @@ if TYPE_CHECKING:
     from langgraph.types import StateSnapshot
 
     from langgraph_events._graph import EventGraph
+    from langgraph_events._stop import ResumeValue
     from langgraph_events._types import PauseSignal
 
     from ._protocols import EventMapper, ResumeFactory, SeedFactory
@@ -83,7 +87,8 @@ if TYPE_CHECKING:
 _SERVER_ONLY_KEYS = frozenset({"thread_id", "checkpoint_id", "checkpoint_ns"})
 """The ``configurable`` keys that a client cannot set. They choose a checkpoint."""
 
-type _RunItem = BaseEvent | RunFinishedCancelledOutcome
+type _Outcome = RunFinishedCancelledOutcome | RunFinishedInterruptOutcome
+type _RunItem = BaseEvent | _Outcome
 
 
 class _FactoryRefusalError(Exception):
@@ -352,6 +357,7 @@ class AGUIAdapter:
 
         The replay is one AG-UI run. It starts with ``RUN_STARTED`` and ends
         with ``RUN_FINISHED``, or with ``RUN_ERROR`` when the replay raises.
+        On a paused thread, ``RUN_FINISHED`` carries the interrupt outcome.
 
         Args:
             input_data: AG-UI ``RunAgentInput``.
@@ -394,20 +400,30 @@ class AGUIAdapter:
     async def _replay(
         self,
         config: RunnableConfig,
-        events: Callable[[StateSnapshot | None], Iterable[BaseEvent]],
-    ) -> AsyncIterator[BaseEvent]:
+        events: Callable[[StateSnapshot | None], Iterable[_RunItem]],
+    ) -> AsyncIterator[_RunItem]:
         for agui_event in events(await self._aget_checkpoint_snapshot(config)):
             yield agui_event
 
     def _checkpoint_events(
         self, checkpoint: StateSnapshot | None, ctx: MapperContext
-    ) -> Iterator[BaseEvent]:
-        """Yield the snapshots, then the pending interrupts, of *checkpoint*."""
+    ) -> Iterator[_RunItem]:
+        """Yield the snapshots, then the pending interrupts, of *checkpoint*.
+
+        The last item is the interrupt outcome, when an interrupt is open.
+        """
         yield from self._snapshot_events(checkpoint)
         if checkpoint is None:
             return
         for interrupted in self._interrupts_from_snapshot(checkpoint):
             yield from self._map_event(interrupted, ctx)
+        outcome = interrupt_outcome(
+            (i.id, i.value)
+            for i in _snapshot_interrupts(checkpoint)
+            if i.value is not None
+        )
+        if outcome is not None:
+            yield outcome
 
     def _snapshot_events(self, checkpoint: StateSnapshot | None) -> list[BaseEvent]:
         channels = (
@@ -422,9 +438,53 @@ class AGUIAdapter:
             build_messages_snapshot(channels.get("messages") or []),
         ]
 
+    async def _answers_from_resume_list(
+        self,
+        input_data: RunAgentInput,
+        checkpoint: StateSnapshot,
+        checkpoint_state: CheckpointState | None,
+    ) -> dict[str, Event] | None:
+        """The answers of an AG-UI 1.0 resume list, or ``None`` for none.
+
+        An open interrupt that no entry names stays open, so the run ends with
+        the interrupt outcome again. AG-UI 1.0 answers a frontend tool call in
+        the messages, not in the list. So the event of the resume factory
+        answers the one open ``FrontendToolCallRequested``.
+        """
+        open_interrupts = {i.id: i.value for i in _snapshot_interrupts(checkpoint)}
+        try:
+            answers = answers_by_interrupt_id(input_data.resume or [], open_interrupts)
+        except RunRefusedError as refusal:
+            raise _FactoryRefusalError(refusal) from refusal
+        if self._resume_factory is None:
+            return answers or None
+        tool_answer = await _call_factory(
+            self._resume_factory,
+            input_data,
+            checkpoint_state,
+            accepts_state=self._resume_accepts_state,
+        )
+        if tool_answer is None:
+            return answers or None
+        tool_calls = [
+            interrupt_id
+            for interrupt_id, value in open_interrupts.items()
+            if isinstance(value, FrontendToolCallRequested)
+            and interrupt_id not in answers
+        ]
+        if len(tool_calls) != 1:
+            raise _FactoryRefusalError(
+                RunRefusedError(
+                    "unanswerable_interrupt",
+                    "Beside a resume list, the resume factory answers one open "
+                    f"frontend tool call, but {len(tool_calls)} are open.",
+                )
+            )
+        return {**answers, tool_calls[0]: tool_answer}
+
     def _should_gate_with_checkpoint_replay(
         self,
-        resume_event: Event | None,
+        resume_event: ResumeValue | None,
         checkpoint_state: CheckpointState | None,
     ) -> bool:
         """Whether interrupt gate should short-circuit to checkpoint replay."""
@@ -478,37 +538,35 @@ class AGUIAdapter:
     async def _resume_event_stream(
         self,
         input_data: RunAgentInput,
-        resume_event: Event,
+        resume_event: ResumeValue,
         config: RunnableConfig,
         snapshot: StateSnapshot | None,
         context: object,
-        signals: _RunSignals,
     ) -> AsyncIterator[StreamItem]:
-        """Resume path that routes ``FrontendStateMutated`` through both
+        """Resume path that routes ``FrontendStateMutated`` through the
         reducer dispatch and the LangGraph channel state.
 
-        For each reducer subscribing to ``FrontendStateMutated``, compute the
-        contribution and ``apre_seed`` it to the channel so handlers reading
-        reducer state via parameter injection on the resumed step see the
-        update.  This preserves reducer ``fn`` semantics (transformations,
-        ``SKIP``) — unlike the old ``apre_seed(raw_state)`` bypass that wrote
-        client values directly and could clobber backend-authoritative
-        channels with stale snapshot keys.
+        The client state goes in as a seed of ``astream_resume``. It rides in
+        the answer, so the paused handler stores it when it applies the
+        answer. A stop that cuts the replay then stores neither.
 
-        Then pass FSM as a seed to ``astream_resume`` so it appears in the
-        output stream and audit log alongside the resume event.
-
-        **Limitation**: ``@on(FrontendStateMutated)`` handlers do not fire on
-        resume — LangGraph's ``Command(resume=...)`` carries one value and
-        seeds are dispatched out-of-graph.  Use ``@on(Resumed)`` for
-        resume-time side effects.
+        An ``@on(FrontendStateMutated)`` handler fires once on the resume.
         """
-        signals.refuse_set_stop()
         fsm = self._build_resume_frontend_state_event(input_data)
-        if fsm is not None:
-            await self._commit_resume_frontend_state(fsm, config)
-            # The commit writes a new checkpoint, so *snapshot* is stale.
-            snapshot = None
+        if (
+            fsm is not None
+            and snapshot is not None
+            and self._graph.seed_target(resume_event, snapshot) is None
+        ):
+            raise _FactoryRefusalError(
+                RunRefusedError(
+                    "raw_interrupt_takes_no_client_state",
+                    "Each answered handler paused with a raw "
+                    "langgraph.types.interrupt() call, which cannot take "
+                    "RunAgentInput.state. Resume without state, or return the "
+                    "Interrupted from the handler.",
+                )
+            )
         async for item in self._graph.astream_resume(
             resume_event,
             seeds=[fsm] if fsm is not None else [],
@@ -532,53 +590,14 @@ class AGUIAdapter:
             return None
         return FrontendStateMutated(state=filtered)
 
-    async def _commit_resume_frontend_state(
-        self, fsm: FrontendStateMutated, config: RunnableConfig
-    ) -> None:
-        """Persist FSM into the audit log AND apply reducer contributions
-        to user channels — both before the resume's domain dispatch runs.
-
-        Channel reducers merge the writes (``operator.add`` for ``events``,
-        scalar / accumulator for user reducers).  We do NOT emit FSM via
-        the seed_node here: ``Command(resume=...)`` carries one value and
-        doesn't route seeds through ``inp["events"]``, so this ``apre_seed``
-        is the sole path that lands FSM in the persisted ``events``
-        channel.  ``_astream_v2`` yields seeds into the output stream but
-        deliberately skips re-applying seed contributions on resume to
-        avoid double-counting accumulator reducers.
-
-        If a future refactor unifies seed dispatch through ``inp["events"]``,
-        drop the ``{"events": [fsm]}`` entry to avoid duplication.
-        """
-        updates: dict[str, Any] = {"events": [fsm]}
-        updates.update(self._reducer_updates_for([fsm]))
-        await self._graph.apre_seed(config, updates)
-
-    def _reducer_updates_for(self, events: list[Event]) -> dict[str, Any]:
-        """Compute per-channel reducer contributions for *events*.
-
-        Runs each registered reducer's ``collect`` against *events* and
-        returns the dict of channel updates (only including channels with
-        actual contributions).  Used on the resume path to materialise FSM
-        reducer effects into LangGraph channel state so subsequent handlers
-        see them via parameter injection.
-        """
-        updates: dict[str, Any] = {}
-        for name, reducer in self._graph.topology.reducers.items():
-            contribution = reducer.collect(events)
-            if reducer.has_contributions(contribution):
-                updates[name] = contribution
-        return updates
-
     async def _build_event_stream(
         self,
         input_data: RunAgentInput,
         checkpoint_state: CheckpointState | None,
-        resume_event: Event | None,
+        resume_event: ResumeValue | None,
         config: RunnableConfig,
         snapshot: StateSnapshot | None,
         context: object,
-        signals: _RunSignals,
     ) -> AsyncIterator[StreamItem]:
         """Create the underlying EventGraph async event stream.
 
@@ -587,7 +606,7 @@ class AGUIAdapter:
         """
         if resume_event is not None:
             return self._resume_event_stream(
-                input_data, resume_event, config, snapshot, context, signals
+                input_data, resume_event, config, snapshot, context
             )
         seed: Event | list[Event] = await _call_factory(
             self._seed_factory,
@@ -738,7 +757,6 @@ class AGUIAdapter:
         ctx: MapperContext,
         config: RunnableConfig,
         context: object,
-        signals: _RunSignals,
     ) -> AsyncIterator[_RunItem]:
         """Stream domain events through the mapper chain."""
         # Determine resume vs fresh run — lazy checkpoint read
@@ -755,16 +773,20 @@ class AGUIAdapter:
             if checkpoint_snapshot is not None
             else None
         )
-        resume_event: Event | None = (
-            None
-            if self._resume_factory is None
-            else await _call_factory(
+        resume_event: ResumeValue | None
+        if input_data.resume and checkpoint_snapshot is not None:
+            resume_event = await self._answers_from_resume_list(
+                input_data, checkpoint_snapshot, checkpoint_state
+            )
+        elif self._resume_factory is not None:
+            resume_event = await _call_factory(
                 self._resume_factory,
                 input_data,
                 checkpoint_state,
                 accepts_state=self._resume_accepts_state,
             )
-        )
+        else:
+            resume_event = None
         is_resume = resume_event is not None
         emitted_state_snapshot = False
 
@@ -781,9 +803,9 @@ class AGUIAdapter:
             config,
             checkpoint_snapshot,
             context,
-            signals,
         )
 
+        pending: list[InterruptFrame] = []
         async for item in event_stream:
             if isinstance(item, LLMToken):
                 for agui_event in self._events_from_llm_token(item, ctx):
@@ -803,6 +825,7 @@ class AGUIAdapter:
                     value=item.data,
                 )
             elif isinstance(item, InterruptFrame):
+                pending.append(item)
                 for agui_event in self._map_event(item.value, ctx):
                     yield agui_event
             elif isinstance(item, StreamFrame):
@@ -838,6 +861,9 @@ class AGUIAdapter:
                 type=EventType.TOOL_CALL_END,
                 tool_call_id=tc_id,
             )
+        outcome = interrupt_outcome((f.interrupt_id, f.value) for f in pending)
+        if outcome is not None:
+            yield outcome
 
     def stream(
         self,
@@ -894,7 +920,9 @@ class AGUIAdapter:
             stop_on: An object with ``is_set()``, as
                 :meth:`EventGraph.ainvoke` describes it.  The stream then
                 ends on ``RUN_FINISHED`` with ``RunFinishedCancelledOutcome``.
-                See ``docs/control-flow.md``, "Stop on a signal".
+                A resume turn that the stop cuts before it applies its
+                answers ends the same way, and the thread stays paused. See
+                ``docs/agui.md``, "Run outcomes".
 
         Raises:
             TypeError: *pause_on* or *stop_on* is a class, or has no
@@ -922,7 +950,7 @@ class AGUIAdapter:
         )
         return self._as_run(
             ctx,
-            self._stream_event_source(input_data, ctx, run_config, context, signals),
+            self._stream_event_source(input_data, ctx, run_config, context),
         )
 
     @staticmethod
@@ -954,13 +982,31 @@ class AGUIAdapter:
             run_id=ctx.run_id,
         )
 
-        outcome: RunFinishedCancelledOutcome | None = None
+        outcome: _Outcome | None = None
         try:
             async for agui_event in source:
-                if isinstance(agui_event, RunFinishedCancelledOutcome):
+                if isinstance(
+                    agui_event,
+                    (RunFinishedCancelledOutcome, RunFinishedInterruptOutcome),
+                ):
                     outcome = agui_event
                 else:
                     yield agui_event
+
+        except ResumeStoppedError:
+            # The stop came before the resume applied its answers. The thread
+            # stays paused on its questions.
+            for message_id in ctx.drain_open_stream_message_ids():
+                yield TextMessageEndEvent(
+                    type=EventType.TEXT_MESSAGE_END,
+                    message_id=message_id,
+                )
+            for tc_id in ctx.drain_open_tool_call_ids():
+                yield ToolCallEndEvent(
+                    type=EventType.TOOL_CALL_END,
+                    tool_call_id=tc_id,
+                )
+            outcome = RunFinishedCancelledOutcome()
 
         except UnmappedEventError:
             # on_unmapped="raise" is a strict CI gate — propagate instead of

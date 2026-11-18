@@ -22,6 +22,19 @@ class AGUISerializable(Protocol):
 
 
 @runtime_checkable
+class AGUIAnswerable(Protocol):
+    """Opt-in protocol for an interrupt that reads its AG-UI 1.0 answer.
+
+    The adapter calls it for a ``resolved`` entry of ``RunAgentInput.resume``
+    that names the interrupt.
+    """
+
+    def agui_answer(self, payload: Any) -> Event:  # noqa: ANN401 - the JSON answer of the client
+        """Return the event that answers this interrupt with *payload*."""
+        ...
+
+
+@runtime_checkable
 class AGUICustomEvent(AGUISerializable, Protocol):
     """Events that control their AG-UI custom event name.
 

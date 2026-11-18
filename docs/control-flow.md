@@ -186,6 +186,30 @@ log = graph.resume(ApprovalSubmitted(approved=True), config=config)
 
 The resume value must be an `Event`. Another value raises `TypeError` before the graph runs, so the thread stays paused and a later `resume()` can answer it. A handler that pauses two times in one run is resumed two times. After the first resume, the thread is paused again and `get_state(config).is_interrupted` is `True`. Under the default `on_unresumable="raise"`, `resume()` raises [`UnresumableError`](api.md#warnings) only when no registered handler waits for an answer.
 
+### Answers by interrupt id
+
+When two handlers pause in parallel, one resume can answer both. Pass a mapping of LangGraph interrupt ids to answers to `resume()`, `aresume()`, `stream_resume()` or `astream_resume()`. Read the ids from `graph.compiled.get_state(config).interrupts`:
+
+```python
+...
+snapshot = graph.compiled.get_state(config)
+ids = {type(i.value): i.id for i in snapshot.interrupts}
+graph.resume(
+    {
+        ids[OrderConfirmationRequested]: ApprovalSubmitted(approved=True),
+        ids[AddressRequested]: Dismissed(interrupted=snapshot.interrupts[1].value),
+    },
+    config=config,
+)
+```
+
+- An open interrupt that the mapping does not name stays open. The run stores the answers that it got, and the thread stays paused. The handlers of those answers run when a resume answers the last open interrupt of the round.
+- A key that names no open interrupt raises `ValueError` before the graph runs. The thread keeps every question.
+- An empty mapping, or a value that is not an `Event`, raises `TypeError`.
+- A single `Event` still answers a thread with one open interrupt. With more than one open interrupt, LangGraph refuses it with `RuntimeError`.
+
+`Dismissed(interrupted=...)` is the answer to a question that a person dismissed without an answer. The run dispatches it like any answer. Subscribe with `@on(Dismissed, interrupted=AddressRequested)` to react to one question. Unlike `abandon()`, it closes one question and the thread goes on.
+
 For an interrupt whose frontend needs an action-discriminated dict, subclass `langgraph_events.agui.InterruptedWithPayload[PayloadT]`. See [Typed Interrupt Payloads](agui.md#typed-interrupt-payloads).
 
 See the [approval pattern](patterns.md#expense-hitl) and [What changes safely](event-migrations.md#what-changes-safely).
@@ -290,8 +314,16 @@ stopping.set()
 - `CancelledOnSignal.discarded` names each handler whose step the stop cut, joined with `", "`. It is `""` when the signal was set after the last handler step.
 - When a sibling handler interrupts in the same round, the interrupt wins. The thread stores the question and no `CancelledOnSignal`. The resume stores one `HandlerCutOnSignal` for each cut handler, then dispatches the answer. No handler runs on `HandlerCutOnSignal`, and no later `CancelledOnSignal.discarded` names its handler.
 - A stream (`astream_resume()`, `stream_resume()`, `AGUIAdapter.stream()`) does not yield `HandlerCutOnSignal`, because the resume command writes it. Only the stored log shows it.
-- `aresume()`, `astream_resume()` and the resume of `AGUIAdapter.stream()` raise `ValueError` when the signal is already set at the call. The thread stays paused on its question.
-- A signal set while `aresume()` replays the paused handler cuts that replay. The question and the answer are then lost, and `CancelledOnSignal.discarded` names the replayed handler.
+- A stop can come before a resume applies its answers. `aresume()` and `astream_resume()` then raise `ResumeStoppedError`. The two cases are:
+    - The signal is already set at the call. The resume runs nothing.
+    - The signal is set while the resume replays a paused handler. The replay is cut, and its step fails, so LangGraph commits no checkpoint for it.
+- After `ResumeStoppedError`, each cut question stays open with the same interrupt id, and its answer is not stored. Resume again to answer it. This holds for the durability `"sync"` (the default), `"async"` and `"exit"`.
+- Each question is applied whole or not at all. When a resume answers several questions, a replay that ended before the stop keeps its answer. Only the cut questions stay open.
+- The `seeds=` of `astream_resume()` and `stream_resume()` ride in the answer. The paused handler stores them, before the answer, when it applies the answer. So a resume that `ResumeStoppedError` stops stores no seed, also after several stopped resumes in a row. A handler that pauses again in the resume stores the seeds of each resume when it finishes.
+- A paused handler that called `langgraph.types.interrupt()` in its body receives the resume value as it is, so it cannot take seeds. A resume with `seeds=` raises `ValueError` before the run when each answered interrupt comes from such a call. lge reads this from the paused handler: an interrupt is returned when the handler declares its class, or declares no return type, and the code of the handler does not name `langgraph.types.interrupt`. A call to `interrupt()` in a helper function that the handler calls is not seen. Such a handler receives the internal carrier of the seeds, and the seeds are lost. Do not call `interrupt()` from a helper of a handler that gets client state.
+- The `HandlerCutOnSignal` records stay after `ResumeStoppedError`. Each one states a fact of the paused round, no handler runs on it, and a later resume does not store it again.
+- The resume of `AGUIAdapter.stream()` does not raise. It ends on `RUN_FINISHED` with `RunFinishedCancelledOutcome`, and the thread stays paused. See [Run outcomes](agui.md#run-outcomes).
+- A stop set after the replay commits ends the run as any stop does, with `CancelledOnSignal`.
 - `abandon()` on a thread paused after a cut stores no `HandlerCutOnSignal`. The next run clears the name of the cut handler.
 - The cursor moves past `CancelledOnSignal`, so a new run on the same `thread_id` continues.
 

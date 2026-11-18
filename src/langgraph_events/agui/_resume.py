@@ -9,13 +9,21 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from langgraph_events._event import Dismissed, Interrupted
+
+from ._errors import RunRefusedError
 from ._extras import AGUI_HELD_PARTS_KEY, capped_slot, collect_inbound_extras
+from ._protocols import AGUIAnswerable
 
 if TYPE_CHECKING:
-    from ag_ui.core import InputContentPart, Message
+    from collections.abc import Mapping
+
+    from ag_ui.core import InputContentPart, Message, ResumeEntry
     from ag_ui.core.types import RunAgentInput
     from langchain_core.messages import BaseMessage
     from langchain_core.messages.tool_call import ToolCall as LCToolCall
+
+    from langgraph_events._event import Event
 
 logger = logging.getLogger(__name__)
 
@@ -264,6 +272,9 @@ def extract_resume_input(input_data: RunAgentInput) -> Any:  # noqa: ANN401 - de
     JSON value on success; the raw string on ``JSONDecodeError``). Dicts,
     lists, and numbers pass through unchanged. Returns ``None`` if absent or
     falsy.
+
+    An AG-UI 1.0 client sends ``RunAgentInput.resume`` instead. The adapter
+    answers that list itself and does not call the resume factory.
     """
     forwarded = input_data.forwarded_props or {}
     resume = (forwarded.get("command") or {}).get("resume")
@@ -275,3 +286,46 @@ def extract_resume_input(input_data: RunAgentInput) -> Any:  # noqa: ANN401 - de
         except json.JSONDecodeError:
             return resume
     return resume
+
+
+def answers_by_interrupt_id(
+    entries: list[ResumeEntry], open_interrupts: Mapping[str, object]
+) -> dict[str, Event]:
+    """The answer to each open interrupt that a resume entry names, by id.
+
+    *open_interrupts* maps the id of each open interrupt to its value. An
+    entry that names no open interrupt is dropped with a ``WARNING``. A
+    ``resolved`` entry gives the ``agui_answer`` of its interrupt. A
+    ``cancelled`` entry gives :class:`Dismissed`.
+
+    Raises:
+        RunRefusedError: Two entries name one interrupt
+            (``duplicate_resume_entry``). Or an entry names an interrupt that
+            cannot take it (``unanswerable_interrupt``).
+    """
+    known = [e for e in entries if e.interrupt_id in open_interrupts]
+    if len(known) < len(entries):
+        logger.warning(
+            "Dropping AG-UI resume entries that name no open interrupt: %d.",
+            len(entries) - len(known),
+        )
+    ids = [e.interrupt_id for e in known]
+    if len(set(ids)) < len(ids):
+        raise RunRefusedError(
+            "duplicate_resume_entry",
+            f"Each resume entry must name another interrupt, got the ids {ids!r}.",
+        )
+    return {e.interrupt_id: _answer(e, open_interrupts[e.interrupt_id]) for e in known}
+
+
+def _answer(entry: ResumeEntry, question: object) -> Event:
+    if entry.status == "cancelled" and isinstance(question, Interrupted):
+        return Dismissed(interrupted=question)
+    if entry.status == "resolved" and isinstance(question, AGUIAnswerable):
+        return question.agui_answer(entry.payload)
+    raise RunRefusedError(
+        "unanswerable_interrupt",
+        f"The interrupt {entry.interrupt_id!r} is a {type(question).__name__}. "
+        f"It cannot take a {entry.status!r} resume entry. Implement "
+        "agui_answer() on it to read a resolved entry.",
+    )

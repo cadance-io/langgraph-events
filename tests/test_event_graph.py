@@ -43,6 +43,7 @@ from langgraph_events import (
     Abandoned,
     Cancelled,
     Command,
+    Dismissed,
     DomainEvent,
     Event,
     EventGraph,
@@ -6554,3 +6555,99 @@ def describe_namespaces_cache():
         graph = EventGraph([Order.Place])
 
         assert graph.namespaces() is graph.namespaces()
+
+
+class SecondQuestion(Interrupted):
+    draft: str = ""
+
+
+class SecondAnswer(IntegrationEvent):
+    pass
+
+
+@on(Started)
+def _ask_first(event: Started) -> ApprovalRequested:
+    return ApprovalRequested(draft="first")
+
+
+@on(Started)
+def _ask_second(event: Started) -> SecondQuestion:
+    return SecondQuestion(draft="second")
+
+
+async def _two_open(thread_id: str, *handlers: Any) -> tuple[EventGraph, Any, dict]:
+    """A graph whose thread waits on two parallel questions, and their ids."""
+    graph = EventGraph([_ask_first, _ask_second, *handlers], checkpointer=MemorySaver())
+    config = {"configurable": {"thread_id": thread_id}}
+    await graph.ainvoke(Started(data="go"), config=config)
+    snapshot = await graph.compiled.aget_state(config)
+    ids = {type(i.value): i.id for i in snapshot.interrupts}
+    return graph, config, ids
+
+
+def describe_aresume_by_interrupt_id():
+    def when_the_answers_cover_both_open_interrupts():
+        async def it_dispatches_each_answer():
+            answered: list[str] = []
+
+            @on(ReviewApproved)
+            def first(event: ReviewApproved) -> None:
+                answered.append("first")
+
+            @on(SecondAnswer)
+            def second(event: SecondAnswer) -> None:
+                answered.append("second")
+
+            graph, config, ids = await _two_open("by-id-both", first, second)
+
+            await graph.aresume(
+                {
+                    ids[ApprovalRequested]: ReviewApproved(),
+                    ids[SecondQuestion]: SecondAnswer(),
+                },
+                config=config,
+            )
+
+            assert sorted(answered) == ["first", "second"]
+            assert (await graph.aget_state(config)).is_interrupted is False
+
+    def when_the_answers_cover_one_open_interrupt():
+        async def it_keeps_the_other_open():
+            graph, config, ids = await _two_open("by-id-one")
+
+            await graph.aresume({ids[SecondQuestion]: SecondAnswer()}, config=config)
+
+            snapshot = await graph.compiled.aget_state(config)
+            assert [i.id for i in snapshot.interrupts] == [ids[ApprovalRequested]]
+
+    def when_an_answer_names_no_open_interrupt():
+        async def it_raises_and_keeps_both_open():
+            graph, config, ids = await _two_open("by-id-unknown")
+
+            with pytest.raises(ValueError, match="'not-open'"):
+                await graph.aresume({"not-open": SecondAnswer()}, config=config)
+
+            snapshot = await graph.compiled.aget_state(config)
+            assert sorted(i.id for i in snapshot.interrupts) == sorted(ids.values())
+
+    def when_the_answer_dismisses_a_question():
+        async def it_dispatches_the_dismissal_to_its_question_handler():
+            dismissed: list[str] = []
+
+            @on(Dismissed, interrupted=SecondQuestion)
+            def note(event: Dismissed, interrupted: SecondQuestion) -> None:
+                dismissed.append(interrupted.draft)
+
+            graph, config, ids = await _two_open("by-id-dismiss", note)
+
+            await graph.aresume(
+                {
+                    ids[ApprovalRequested]: ReviewApproved(),
+                    ids[SecondQuestion]: Dismissed(
+                        interrupted=SecondQuestion(draft="second")
+                    ),
+                },
+                config=config,
+            )
+
+            assert dismissed == ["second"]

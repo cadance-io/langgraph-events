@@ -25,6 +25,7 @@ from langgraph_events.agui._mappers import (
     held_parts,
 )
 from langgraph_events.agui._protocols import (
+    AGUIAnswerable,
     AGUICustomEvent,
     AGUISerializable,
     EventMapper,
@@ -76,6 +77,7 @@ __all__ = [
     "AGUI_EXTRAS_OPEN_FIELDS",
     "AGUI_HELD_PARTS_KEY",
     "AGUIAdapter",
+    "AGUIAnswerable",
     "AGUICustomEvent",
     "AGUISerializable",
     "EventMapper",

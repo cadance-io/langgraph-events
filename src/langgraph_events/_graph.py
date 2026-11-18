@@ -3,11 +3,11 @@
 import dataclasses
 import functools
 import inspect
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.pregel import Pregel
-from langgraph.types import Command as LGCommand
 
 from langgraph_events._causes import pad_causes
 from langgraph_events._custom_event import STATE_SNAPSHOT_EVENT_NAME
@@ -16,6 +16,7 @@ from langgraph_events._event import (
     Event,
     Interrupted,
     Namespace,
+    SeededAnswer,
     Unresumable,
 )
 from langgraph_events._event_log import EventLog
@@ -25,7 +26,7 @@ from langgraph_events._rewrite import (
 )
 from langgraph_events._run_signals import _RunSignals
 from langgraph_events._services import Services
-from langgraph_events._stop import resume_command
+from langgraph_events._stop import ResumeValue, resume_command
 from langgraph_events._store import EventStore
 from langgraph_events._topology import EventTopology, namespace_handlers
 from langgraph_events._warn import warn_user
@@ -35,7 +36,6 @@ if TYPE_CHECKING:
         AsyncIterator,
         Callable,
         Iterator,
-        Mapping,
         Sequence,
     )
 
@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
     from langgraph.store.base import BaseStore
     from langgraph.types import Checkpointer, Interrupt, StateSnapshot
+    from langgraph.types import Command as LGCommand
 
     from langgraph_events._causes import CauseEntry
     from langgraph_events._namespace import NamespaceModel
@@ -132,10 +133,13 @@ class InterruptFrame(NamedTuple):
     new item type.
 
     ``value`` is the payload of the interrupt. For a handler that returns an
-    :class:`Interrupted` event, the value is that event.
+    :class:`Interrupted` event, the value is that event. ``interrupt_id`` is
+    the LangGraph id of the interrupt. LangGraph derives it from the paused
+    handler step, so a second interrupt of the same step gets the same id.
     """
 
     value: Any
+    interrupt_id: str
 
 
 class StateSnapshotFrame(NamedTuple):
@@ -635,6 +639,42 @@ class EventGraph:
             config, pad_causes(values, None), as_node="__seed__"
         )
 
+    def seed_target(self, value: ResumeValue, snapshot: StateSnapshot) -> str | None:
+        """The open interrupt whose answer carries the ``seeds=`` of a resume.
+
+        It is the first answered interrupt, in checkpoint task order, whose
+        handler paused by returning it. ``None`` when each answered interrupt
+        comes from a ``langgraph.types.interrupt()`` call in a handler body.
+        Such a call receives the resume value as it is, so it cannot unwrap
+        the seeds.
+        """
+        answered = None if isinstance(value, Event) else set(value)
+        for task in snapshot.tasks:
+            for pending in task.interrupts:
+                if answered is not None and pending.id not in answered:
+                    continue
+                if self._topology.returns_interrupt(task.name, pending.value):
+                    return pending.id
+        return None
+
+    def _with_seeds(
+        self, value: ResumeValue, seeds: list[Event], snapshot: StateSnapshot | None
+    ) -> ResumeValue:
+        """*value*, with *seeds* in the answer of :meth:`seed_target`."""
+        if not seeds:
+            return value
+        target = None if snapshot is None else self.seed_target(value, snapshot)
+        if target is None:
+            raise ValueError(
+                "resume() got seeds=, but each answered interrupt comes from a "
+                "raw langgraph.types.interrupt() call in a handler body, which "
+                "cannot take them. Return the Interrupted from the handler, or "
+                "resume without seeds=."
+            )
+        if isinstance(value, Event):
+            return SeededAnswer(answer=value, seeds=tuple(seeds))
+        return {**value, target: SeededAnswer(answer=value[target], seeds=tuple(seeds))}
+
     def _refuse_derived_seed(self, values: Mapping[str, Any]) -> None:
         derived = sorted(set(values) & self._topology.derived.keys())
         if derived:
@@ -745,7 +785,7 @@ class EventGraph:
         return False
 
     def _apply_unresumable_policy(
-        self, value: Event, kwargs: dict[str, Any]
+        self, value: ResumeValue, kwargs: dict[str, Any]
     ) -> EventLog:
         """Sync ``on_unresumable`` for a resume that would be a no-op.
 
@@ -759,7 +799,7 @@ class EventGraph:
         return self.event_store._settle(config, self._unresumable_event(value))
 
     async def _aapply_unresumable_policy(
-        self, value: Event, kwargs: dict[str, Any]
+        self, value: ResumeValue, kwargs: dict[str, Any]
     ) -> EventLog:
         """Async sibling of :meth:`_apply_unresumable_policy`."""
         config = kwargs["config"]
@@ -769,24 +809,36 @@ class EventGraph:
         return await self.event_store._asettle(config, self._unresumable_event(value))
 
     @staticmethod
-    def _unresumable_event(value: Event) -> Unresumable:
-        return Unresumable(resume_value=type(value).__name__)
+    def _unresumable_event(value: ResumeValue) -> Unresumable:
+        answers = [value] if isinstance(value, Event) else list(value.values())
+        return Unresumable(
+            resume_value=", ".join(type(answer).__name__ for answer in answers)
+        )
 
     @staticmethod
     def _require_resume_event(value: object) -> None:
-        """Raise ``TypeError`` if *value* is not an ``Event``.
+        """Raise ``TypeError`` if *value* is not an ``Event`` or answers by id.
 
         The check runs before the graph runs. LangGraph saves a resume value
         in the checkpoint before the paused handler reads it. A rerun then
         reads the saved value again, so a bad value strands the thread.
         """
-        if not isinstance(value, Event):
-            got = type(value).__name__
-            raise TypeError(f"resume() requires an Event instance, got {got}")
+        if isinstance(value, Event):
+            return
+        if isinstance(value, Mapping) and value:
+            bad = [type(a).__name__ for a in value.values() if not isinstance(a, Event)]
+            if not bad:
+                return
+            raise TypeError(f"resume() requires an Event for each id, got {bad}")
+        got = type(value).__name__
+        raise TypeError(
+            "resume() requires an Event instance, or a non-empty mapping of "
+            f"interrupt ids to Event instances, got {got}"
+        )
 
     def resume(
         self,
-        value: Event,
+        value: ResumeValue,
         *,
         deadline: float | None = None,
         pause_on: PauseSignal | None = None,
@@ -802,7 +854,9 @@ class EventGraph:
         round.
 
         Args:
-            value: The domain event to resume with.
+            value: The domain event to resume with, or a mapping of open
+                interrupt ids to answers. A key that names no open interrupt
+                raises ``ValueError`` before the graph runs.
             deadline: A ``time.monotonic()`` instant. At the first round
                 boundary past it, the router emits ``RunPausedOnDeadline``
                 and the run ends cleanly. ``None`` (default) disables.
@@ -830,7 +884,7 @@ class EventGraph:
 
     async def aresume(
         self,
-        value: Event,
+        value: ResumeValue,
         *,
         deadline: float | None = None,
         pause_on: PauseSignal | None = None,
@@ -850,12 +904,14 @@ class EventGraph:
         self._require_checkpointer("aresume")
         self._require_resume_event(value)
         signals = _RunSignals(deadline=deadline, pause_on=pause_on, stop_on=stop_on)
-        signals.refuse_set_stop()
+        signals.refuse_set_stop(kwargs.get("config"))
         self._check_run(kwargs)
         snapshot = await self._aresume_snapshot(kwargs, None)
         if not self._resume_is_pending(snapshot):
             return await self._aapply_unresumable_policy(value, kwargs)
-        return await self._arun(resume_command(value, snapshot), signals, **kwargs)
+        return await self._arun(
+            resume_command(value, snapshot), signals.for_resume(snapshot), **kwargs
+        )
 
     @staticmethod
     def _is_interrupted(snapshot: StateSnapshot) -> bool:
@@ -1031,15 +1087,11 @@ class EventGraph:
         when the caller did not load it.
         """
         compiled = self.compiled
-        is_resume = isinstance(inp, LGCommand)
 
         # The shadow state follows what a shown value reads. It starts from
         # the checkpoint, when one exists, so that it matches what the
-        # compiled graph restored. The seeds then layer on top, except on a
-        # resume: Command(resume=...) routes no seed through the seed node,
-        # and the caller (e.g. AGUIAdapter) pre-seeds their contributions
-        # with apre_seed. Applying them again would double-count an
-        # accumulator reducer. See `AGUIAdapter._resume_event_stream`.
+        # compiled graph restored. The seeds then layer on top. On a resume,
+        # the resume command writes them.
         checkpoint_values: dict[str, Any] | None = None
         config = kwargs.get("config")
         if selection.names and self._checkpointer is not None and config is not None:
@@ -1050,7 +1102,7 @@ class EventGraph:
 
         for s in seeds:
             if selection.names:
-                changed = shadow.changes(s) if is_resume else shadow.apply(s, None)
+                changed = shadow.apply(s, None)
                 yield StreamFrame(
                     event=s, reducers=shadow.values(), changed_reducers=changed
                 )
@@ -1159,7 +1211,9 @@ class EventGraph:
             after = await self.compiled.aget_state(config)
             interrupts = _snapshot_interrupts(after)
         return [
-            InterruptFrame(value=i.value) for i in interrupts if i.value is not None
+            InterruptFrame(value=i.value, interrupt_id=i.id)
+            for i in interrupts
+            if i.value is not None
         ]
 
     def _stream_sync(
@@ -1266,7 +1320,7 @@ class EventGraph:
 
     def stream_resume(
         self,
-        value: Event,
+        value: ResumeValue,
         *,
         seeds: list[Event] | None = None,
         include_reducers: bool | list[str] = False,
@@ -1282,13 +1336,17 @@ class EventGraph:
         stays internal, exactly like ``resume()``.
 
         Args:
-            value: The domain event to resume with.
-            seeds: Optional events to dispatch alongside the resume in the
-                same step.  Their reducer contributions layer onto the
-                checkpointed state *before* the resume's downstream events
-                run, so resume-handler outputs win for shared keys.  Used
-                by ``AGUIAdapter`` to route ``FrontendStateMutated`` through
-                the dispatch chain on resume.
+            value: The domain event to resume with, or a mapping of open
+                interrupt ids to answers. A key that names no open interrupt
+                raises ``ValueError`` before the graph runs.
+            seeds: Optional events that ride in the answer. The paused
+                handler stores them, before the answer, when it applies the
+                answer, and the next round dispatches them. A stop that cuts
+                the replay stores neither. A handler that pauses again stores
+                them when it finishes. Used by ``AGUIAdapter`` to route
+                ``FrontendStateMutated`` on resume. A paused handler that
+                called ``langgraph.types.interrupt()`` in its body cannot take
+                them: ``ValueError``.
             include_reducers: When truthy, yields ``StreamFrame`` tuples
                 instead of bare events.  Pass ``True`` for all reducers or
                 a list of reducer names for selective inclusion.
@@ -1319,8 +1377,8 @@ class EventGraph:
         kwargs.pop("stream_mode", None)
         selection = self._topology.select_reducers(include_reducers)
         yield from self._stream_sync(
-            resume_command(value, snapshot),
-            seeds or [],
+            resume_command(self._with_seeds(value, seeds or [], snapshot), snapshot),
+            [],
             selection,
             _RunSignals(deadline=deadline, pause_on=pause_on, stop_on=None),
             **kwargs,
@@ -1364,7 +1422,7 @@ class EventGraph:
 
     async def astream_resume(
         self,
-        value: Event,
+        value: ResumeValue,
         *,
         seeds: list[Event] | None = None,
         include_reducers: bool | list[str] = False,
@@ -1383,13 +1441,17 @@ class EventGraph:
         yields events as they are produced.
 
         Args:
-            value: The domain event to resume with.
-            seeds: Optional events to dispatch alongside the resume in the
-                same step.  Their reducer contributions layer onto the
-                checkpointed state *before* the resume's downstream events
-                run, so resume-handler outputs win for shared keys.  Used
-                by ``AGUIAdapter`` to route ``FrontendStateMutated`` through
-                the dispatch chain on resume.
+            value: The domain event to resume with, or a mapping of open
+                interrupt ids to answers. A key that names no open interrupt
+                raises ``ValueError`` before the graph runs.
+            seeds: Optional events that ride in the answer. The paused
+                handler stores them, before the answer, when it applies the
+                answer, and the next round dispatches them. A stop that cuts
+                the replay stores neither. A handler that pauses again stores
+                them when it finishes. Used by ``AGUIAdapter`` to route
+                ``FrontendStateMutated`` on resume. A paused handler that
+                called ``langgraph.types.interrupt()`` in its body cannot take
+                them: ``ValueError``.
             include_reducers: When truthy, yields ``StreamFrame`` tuples
                 instead of bare events.  Pass ``True`` for all reducers or
                 a list of reducer names for selective inclusion.
@@ -1422,7 +1484,7 @@ class EventGraph:
         self._require_checkpointer("astream_resume")
         self._require_resume_event(value)
         signals = _RunSignals(deadline=deadline, pause_on=pause_on, stop_on=stop_on)
-        signals.refuse_set_stop()
+        signals.refuse_set_stop(kwargs.get("config"))
         self._check_run(kwargs)
         snapshot = await self._aresume_snapshot(kwargs, _snapshot)
         if not self._resume_is_pending(snapshot):
@@ -1434,13 +1496,13 @@ class EventGraph:
                     yield latest
             return
         async for item in self._astream_entry(
-            resume_command(value, snapshot),
-            seeds or [],
+            resume_command(self._with_seeds(value, seeds or [], snapshot), snapshot),
+            [],
             include_reducers=include_reducers,
             include_llm_tokens=include_llm_tokens,
             include_custom_events=include_custom_events,
             snapshot=snapshot,
-            signals=signals,
+            signals=signals.for_resume(snapshot),
             **kwargs,
         ):
             yield item

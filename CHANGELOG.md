@@ -7,6 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `resume()`, `aresume()`, `stream_resume()` and `astream_resume()` accept a mapping of
+  LangGraph interrupt ids to answers. One resume then answers parallel interrupts. An open
+  interrupt that the mapping does not name stays open. A key that names no open interrupt
+  raises `ValueError` before the graph runs. See
+  [Answers by interrupt id](docs/control-flow.md#answers-by-interrupt-id). See #237.
+- `Dismissed(interrupted=...)` answers a question that a person dismissed without an
+  answer. It is dispatched, so `@on(Dismissed, interrupted=X)` reacts to one question.
+  Unlike `abandon()`, the thread goes on. WARNING: a release older than this one cannot
+  read a stored `Dismissed`. Before a rollback, check that no thread stores one. See #237.
+- `langgraph_events.agui.AGUIAnswerable`, the `agui_answer(payload)` protocol of an
+  `Interrupted` subclass that reads its AG-UI 1.0 answer. See #237.
+
+### Changed
+
+- **BREAKING: `AGUIAdapter` ends a paused run with the AG-UI 1.0 interrupt outcome.** Before,
+  `RUN_FINISHED` had no outcome, and an AG-UI 1.0 client read the run as a success. Now
+  `RUN_FINISHED` carries `RunFinishedInterruptOutcome`, with one `Interrupt` for each open
+  interrupt. This applies to `stream()`, to its replay of a paused thread, and to `connect()`.
+  `snapshot()` keeps no outcome. A `FrontendToolCallRequested` is not in the outcome. The
+  `interrupted` custom event stays on the wire. Migration: a client that reads `outcome` must
+  accept the interrupt outcome. A client that treats any `outcome` as the cancelled outcome
+  must check `outcome.type`. See [Run outcomes](docs/agui.md#run-outcomes). See #237.
+- **BREAKING: a resume turn of `AGUIAdapter.stream()` whose `stop_on=` is already set ends
+  with `RUN_FINISHED` and `RunFinishedCancelledOutcome`.** Before, it ended with `RUN_ERROR`.
+  It still runs no handler, and the thread keeps its question. Migration: a client that
+  waits for `RUN_ERROR` on this case must read the cancelled outcome. See #237.
+- **BREAKING: a stop before a resume applies its answers raises `ResumeStoppedError`.**
+  `aresume()` and `astream_resume()` raise it when `stop_on=` is set at the call, where they
+  raised `ValueError` before. They also raise it when the signal is set during the replay of
+  a paused handler. Before, that stop lost the question and the answer, and the run stored
+  `CancelledOnSignal`. Now the replay step fails, so LangGraph commits no checkpoint, and each
+  cut question stays open with the same interrupt id. A replay that ended before the stop
+  keeps its answer. A stopped resume stores no seed, so a stopped AG-UI turn stores no client
+  state. The `HandlerCutOnSignal` records stay, because they state a fact of the paused round.
+  `AGUIAdapter.stream()` ends both cases with `RUN_FINISHED` and the cancelled outcome.
+  Migration: catch `ResumeStoppedError` in place of `ValueError`, and resume again to answer
+  the question. See [Stop on a signal](docs/control-flow.md#stop-on-a-signal-cancelledonsignal).
+  See #237.
+- **BREAKING: `AGUIAdapter.stream()` answers a non-empty `RunAgentInput.resume` list itself,
+  and does not call the `resume_factory` for it.** A `resolved` entry gives the
+  `agui_answer(payload)` of its interrupt. A `cancelled` entry gives `Dismissed`. An entry
+  that names no open interrupt is dropped with a `WARNING`. An open interrupt that no entry
+  names stays open, and the run ends with the interrupt outcome. Two entries for one
+  interrupt end with `RUN_ERROR` code `duplicate_resume_entry`. An entry that its interrupt
+  cannot take ends with `RUN_ERROR` code `unanswerable_interrupt`. Migration: implement
+  `agui_answer()` on each `Interrupted` subclass that an AG-UI 1.0 client answers. A
+  `resume_factory` that read `RunAgentInput.resume` must move that code to `agui_answer()`.
+  Beside a list, the `resume_factory` still runs. Its event answers the one open
+  `FrontendToolCallRequested`, as the tool message of the input does in AG-UI 1.0. The
+  `forwarded_props.command.resume` path and `extract_resume_input()` stay as they were,
+  for the clients that send it. See [Resume list](docs/agui.md#resume-list). See #237.
+- **BREAKING: the `seeds=` of `astream_resume()` and `stream_resume()` ride in the answer.**
+  The paused handler stores them, before the answer, when it applies the answer. Before, the
+  AG-UI adapter wrote `FrontendStateMutated` with `apre_seed()` first. That write made a new
+  checkpoint, so the open interrupts got new ids, and a resume by id failed. Now:
+  - A seed reaches its handlers: an `@on(FrontendStateMutated)` handler fires once on an
+    AG-UI resume, where it did not fire before.
+  - The client state reaches the handlers when the paused handler finishes. A handler that
+    pauses again in the resume stores the client state of each resume when it finishes. The
+    re-run of the paused handler does not see it.
+  - A stopped resume stores no seed.
+  - A resume with seeds for a handler whose code names `langgraph.types.interrupt` raises
+    `ValueError`. A call in a helper function of the handler is not seen. `AGUIAdapter.stream()` refuses it with `RUN_ERROR` code
+    `raw_interrupt_takes_no_client_state`, and the thread keeps its questions.
+
+  Migration: a handler that must not run on a resume checks `Resumed` in the log. A handler
+  that reads client state while it re-runs must read it in the answer handlers. A handler
+  that pauses with `interrupt()` in its body and gets client state must return the
+  `Interrupted` instead.
+
+  WARNING: a checkpoint can now store the internal type `SeededAnswer`, in the answer of a
+  resume with client state that leaves the thread paused. That happens when the handler
+  pauses a second time, and when a resume by id answers the seeded question while another
+  question stays open. A release older than this one cannot read it. Before a rollback,
+  resume or abandon each thread that is paused after a resume with client state. See #237.
+- **BREAKING: `InterruptFrame` has a second field, `interrupt_id`.** It holds the LangGraph id
+  of the interrupt. Migration: code that unpacks the frame as `(value,)` must unpack
+  `(value, interrupt_id)` or read `frame.value`. See #237.
+
 ## [0.53.0] - 2026-11-18
 
 ### Added
