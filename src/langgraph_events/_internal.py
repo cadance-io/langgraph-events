@@ -51,10 +51,12 @@ from langgraph_events._handler import BoundHandler, HandlerMeta  # noqa: TC001
 from langgraph_events._inputs import NodeCall
 from langgraph_events._pause import _pause_budget, _PauseBudget
 from langgraph_events._reducer import StateRead
+from langgraph_events._run_signals import ResumeStoppedError
 from langgraph_events._stop import (
     STOPPED_HANDLERS,
     add_or_clear,
     cancelled_on_signal,
+    replay_is_stopped,
     run_step,
     stop_is_set,
 )
@@ -854,6 +856,8 @@ def make_handler_node(
                     {"events": [], "causes": [], STOPPED_HANDLERS: [meta.name]}
                 )
         except asyncio.CancelledError:
+            if replay_is_stopped(config):
+                raise ResumeStoppedError from None
             return _finalize(pad_causes({"events": [Cancelled()]}, FRAMEWORK))
         finally:
             _reset_custom_emitters(tokens)

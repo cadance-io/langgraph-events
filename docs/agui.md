@@ -547,7 +547,7 @@ stream = adapter.stream(input_data, context=RunFacts(language="fr"))
 
 `stream()` accepts `deadline=`, an absolute `time.monotonic()` reference, and `pause_on=`, an object with `is_set()` such as an `asyncio.Event`. The router emits a `RunPausedOnDeadline` or a `RunPausedOnSignal`, both `RunPaused` subclasses, and the run finalises through the same `RunFinishedEvent` path as a normal completion. See [Control Flow → Deadline pause](control-flow.md#soft-timeout-runpaused) and [Control Flow → Pause on a signal](control-flow.md#pause-on-a-signal-runpausedonsignal) for the semantics and the resume rule.
 
-`stream()` also accepts `stop_on=`, an object with `is_set()`. When it is set, the run cancels its running async handler, stores `CancelledOnSignal` and ends the stream with `RUN_FINISHED`. That `RUN_FINISHED` carries the outcome `RunFinishedCancelledOutcome`. `CancelledOnSignal` still goes through the mapper chain, so an `EventMapper` can put it on the wire. Its default mapping emits no event, so `on_unmapped=` never warns or raises for it. When a sibling handler interrupts in the same round, the run stores no `CancelledOnSignal`, and `RUN_FINISHED` carries the interrupt outcome. A resume turn whose `stop_on=` is already set runs no handler. It ends with `RUN_FINISHED` and the cancelled outcome, and the thread stays paused. A resume stores a `HandlerCutOnSignal` for each handler that the stop cut before the interrupt. The stream does not yield it, so no mapper sees it. For the cleanup grace period, see [Control Flow → Stop on a signal](control-flow.md#stop-on-a-signal-cancelledonsignal).
+`stream()` also accepts `stop_on=`, an object with `is_set()`. When it is set, the run cancels its running async handler, stores `CancelledOnSignal` and ends the stream with `RUN_FINISHED`. That `RUN_FINISHED` carries the outcome `RunFinishedCancelledOutcome`. `CancelledOnSignal` still goes through the mapper chain, so an `EventMapper` can put it on the wire. Its default mapping emits no event, so `on_unmapped=` never warns or raises for it. When a sibling handler interrupts in the same round, the run stores no `CancelledOnSignal`, and `RUN_FINISHED` carries the interrupt outcome. A resume turn that a stop cuts before it applies its answers ends with `RUN_FINISHED` and the cancelled outcome, and the thread stays paused. This covers a stop already set at the call and a stop set during the replay of a paused handler. A resume stores a `HandlerCutOnSignal` for each handler that the stop cut before the interrupt. The stream does not yield it, so no mapper sees it. For the cleanup grace period, see [Control Flow → Stop on a signal](control-flow.md#stop-on-a-signal-cancelledonsignal).
 
 `RunPaused` does not implement `AGUISerializable`, so `FallbackMapper` skips it with a one-time warning. An app that wants to send a pause signal to the client registers its own mapper:
 
@@ -582,7 +582,7 @@ AG-UI 1.0 reads the `outcome` of `RUN_FINISHED`. An absent outcome means that th
 | Paused on one or more interrupts | `RunFinishedInterruptOutcome` |
 | Paused on a `FrontendToolCallRequested` only | Absent |
 | Stopped by `stop_on=` | `RunFinishedCancelledOutcome` |
-| A resume turn whose `stop_on=` is already set | `RunFinishedCancelledOutcome` |
+| A resume turn that a stop cuts before it applies its answers | `RunFinishedCancelledOutcome` |
 
 The interrupt outcome holds one `Interrupt` for each open interrupt of the thread, in checkpoint task order:
 
@@ -647,7 +647,7 @@ class ApprovalRequested(Interrupted):
 
 AG-UI 1.0 lets a client dismiss an interrupt without an answer. What that means for the work is the choice of the app. Subscribe to `Dismissed` to decide it per question, for example `@on(Dismissed, interrupted=ApprovalRequested)`. Without such a handler, the dismissal only closes the question. See [Answers by interrupt id](control-flow.md#answers-by-interrupt-id).
 
-WARNING: a `stop_on=` signal set after the resume turn starts, and before the replayed paused handler commits, cuts that replay. The thread then loses the question and the answer, and the run ends with the cancelled outcome. The adapter keeps the `RunAgentInput.state` that it wrote before the replay. To keep the question, set the stop before the resume turn starts. See [Stop on a signal](control-flow.md#stop-on-a-signal-cancelledonsignal).
+A `stop_on=` signal set during the replay of a paused handler cuts that replay. The cut question stays open with the same id, and its answer is not stored. A question whose replay ended before the stop keeps its answer. The `RunAgentInput.state` of the stopped turn is stored. See [Stop on a signal](control-flow.md#stop-on-a-signal-cancelledonsignal).
 
 ## AG-UI Spec Coverage
 

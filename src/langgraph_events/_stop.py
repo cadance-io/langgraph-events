@@ -14,7 +14,7 @@ from langgraph_events._event import (
     Halted,
     HandlerCutOnSignal,
 )
-from langgraph_events._run_signals import stop_signal
+from langgraph_events._run_signals import ResumeStoppedError, is_replay, stop_signal
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine, Mapping
@@ -78,11 +78,25 @@ def stop_is_set(config: RunnableConfig | None) -> bool:
     return stop is not None and stop.is_set()
 
 
+def replay_is_stopped(config: RunnableConfig) -> bool:
+    """Whether the stop of the run cut the replay step of *config*.
+
+    LangGraph cancels each sibling of a step that raised. The sibling replay
+    of a stopped resume must then also fail, so that it stores nothing.
+    """
+    return is_replay(config) and stop_is_set(config)
+
+
 async def run_step(work: Coroutine[Any, Any, None], config: RunnableConfig) -> bool:
     """Run *work*, and cancel it when the run's ``stop_on=`` is set.
 
     The cancel goes to *work* only, so it never reaches a checkpoint write.
     Returns whether the stop cut *work*.
+
+    Raises:
+        ResumeStoppedError: the stop cut the replay of a paused handler. The
+            step then fails, so LangGraph commits no checkpoint, and the
+            thread stays paused on its question.
     """
     stop = stop_signal(config)
     if stop is None:
@@ -96,6 +110,13 @@ async def run_step(work: Coroutine[Any, Any, None], config: RunnableConfig) -> b
         await _cancel_until_done(task)
         raise
     if stop.is_set():
+        if is_replay(config):
+            if task.done():
+                # The replay applied its answer before the stop.
+                task.result()
+                return False
+            await _cancel_until_done(task)
+            raise ResumeStoppedError
         await _cancel_until_done(task)
         return True
     task.result()

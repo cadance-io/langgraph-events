@@ -21,7 +21,9 @@ from langgraph_events import (
     CancelledOnSignal,
     EventGraph,
     HandlerCutOnSignal,
+    IntegrationEvent,
     Reducer,
+    ResumeStoppedError,
     Scatter,
     on,
 )
@@ -41,6 +43,54 @@ async def _ask_draft(event: Started) -> ApprovalRequested:
 @on(ReviewApproved)
 async def _finish(event: ReviewApproved) -> Ended:
     return Ended(result="approved")
+
+
+class Answered(IntegrationEvent):
+    note: str = ""
+
+
+class _Replay:
+    """Two questions. While armed, the replay of the first sets the resume stop.
+
+    With *second_finishes*, the replay of the second ends before the stop.
+    Without it, the stop also cuts the replay of the second.
+    """
+
+    def __init__(self, *, second_finishes: bool) -> None:
+        self.second_finishes = second_finishes
+        self.armed = False
+        self.stop = asyncio.Event()
+        self.answers: list[str] = []
+
+    def graph(self) -> EventGraph:
+        @on(Started)
+        async def ask(event: Started) -> ApprovalRequested:
+            if self.armed:
+                await asyncio.sleep(0.05)
+                self.stop.set()
+                await asyncio.sleep(100)
+            return ApprovalRequested(draft="first")
+
+        @on(Started)
+        async def ask_again(event: Started) -> ApprovalRequested:
+            if self.armed and not self.second_finishes:
+                await asyncio.sleep(100)
+            return ApprovalRequested(draft="second")
+
+        @on(Answered)
+        async def record(event: Answered) -> None:
+            self.answers.append(event.note)
+
+        return EventGraph([ask, ask_again, record], checkpointer=MemorySaver())
+
+
+async def _open_ids(graph: EventGraph, config: dict) -> dict[str, str]:
+    snapshot = await graph.compiled.aget_state(config)
+    return {i.value.draft: i.id for i in snapshot.interrupts}
+
+
+async def _stored(graph: EventGraph, config: dict) -> list[object]:
+    return list((await graph.compiled.aget_state(config)).values["events"])
 
 
 def _slow_sibling(stop: asyncio.Event) -> object:
@@ -241,42 +291,6 @@ def describe_stop_on():
                         CancelledOnSignal(discarded=""),
                     ]
 
-            def when_the_resume_signal_cuts_the_replay_of_the_question():
-
-                async def it_names_only_the_replayed_handler_in_discarded():
-                    stop = asyncio.Event()
-                    later_stop = asyncio.Event()
-
-                    @on(Started)
-                    async def ask(event: Started) -> ApprovalRequested:
-                        if stop.is_set():
-                            later_stop.set()
-                            await asyncio.sleep(100)
-                        return ApprovalRequested(draft=event.data)
-
-                    graph = EventGraph(
-                        [ask, _slow_sibling(stop), _finish],
-                        checkpointer=MemorySaver(),
-                    )
-                    config = {"configurable": {"thread_id": "stop-ask-replay-stop"}}
-                    await graph.ainvoke(
-                        Started(data="draft"), stop_on=stop, config=config
-                    )
-
-                    async with asyncio.timeout(5):
-                        resumed = await graph.aresume(
-                            ReviewApproved(), stop_on=later_stop, config=config
-                        )
-
-                    assert [
-                        e
-                        for e in resumed
-                        if isinstance(e, (HandlerCutOnSignal, CancelledOnSignal))
-                    ] == [
-                        HandlerCutOnSignal(handler="slow"),
-                        CancelledOnSignal(discarded="ask"),
-                    ]
-
     def when_the_handler_interrupts_after_the_signal_is_set():
 
         async def it_logs_no_failed_cleanup(caplog):
@@ -336,14 +350,14 @@ def describe_stop_on():
 
         def when_the_signal_is_already_set():
 
-            async def it_raises_ValueError_and_keeps_the_question():
+            async def it_raises_ResumeStoppedError_and_keeps_the_question():
                 stop = asyncio.Event()
                 stop.set()
                 graph = EventGraph([_ask_draft, _finish], checkpointer=MemorySaver())
                 config = {"configurable": {"thread_id": "aresume-set-stop"}}
                 await graph.ainvoke(Started(data="go"), config=config)
 
-                with pytest.raises(ValueError, match="stop_on"):
+                with pytest.raises(ResumeStoppedError):
                     await graph.aresume(ReviewApproved(), stop_on=stop, config=config)
                 state = await graph.aget_state(config)
 
@@ -381,14 +395,14 @@ def describe_stop_on():
 
         def when_the_signal_is_already_set():
 
-            async def it_raises_ValueError_and_keeps_the_question():
+            async def it_raises_ResumeStoppedError_and_keeps_the_question():
                 stop = asyncio.Event()
                 stop.set()
                 graph = EventGraph([_ask_draft, _finish], checkpointer=MemorySaver())
                 config = {"configurable": {"thread_id": "astream-resume-set-stop"}}
                 await graph.ainvoke(Started(data="go"), config=config)
 
-                with pytest.raises(ValueError, match="stop_on"):
+                with pytest.raises(ResumeStoppedError):
                     async for _ in graph.astream_resume(
                         ReviewApproved(), stop_on=stop, config=config
                     ):
@@ -913,3 +927,110 @@ def describe_stop_on():
                 await EventGraph([to_processed]).ainvoke(
                     Started(data="go"), stop_on=bad
                 )
+
+
+async def _stop_the_replay(
+    replay: _Replay, graph: EventGraph, config: dict, durability: str
+) -> None:
+    """Resume both questions, and let the replay of the first set the stop."""
+    ids = await _open_ids(graph, config)
+    replay.armed = True
+    async with asyncio.timeout(5):
+        with pytest.raises(ResumeStoppedError):
+            await graph.aresume(
+                {
+                    ids["first"]: Answered(note="stopped first"),
+                    ids["second"]: Answered(note="stopped second"),
+                },
+                stop_on=replay.stop,
+                config=config,
+                durability=durability,
+            )
+    replay.armed = False
+
+
+async def _paused(second_finishes: bool, durability: str) -> tuple:
+    replay = _Replay(second_finishes=second_finishes)
+    graph = replay.graph()
+    config = {"configurable": {"thread_id": f"replay-{second_finishes}-{durability}"}}
+    await graph.ainvoke(Started(data="go"), config=config, durability=durability)
+    return replay, graph, config
+
+
+@pytest.mark.parametrize("durability", ["sync", "async", "exit"])
+def describe_a_stop_during_the_replay_of_the_questions():
+    def when_the_stop_cuts_each_replay():
+        async def it_keeps_each_question_open_under_its_id(durability):
+            replay, graph, config = await _paused(False, durability)
+            ids = await _open_ids(graph, config)
+
+            await _stop_the_replay(replay, graph, config, durability)
+
+            assert await _open_ids(graph, config) == ids
+
+        async def it_stores_no_answer(durability):
+            replay, graph, config = await _paused(False, durability)
+            stored = await _stored(graph, config)
+
+            await _stop_the_replay(replay, graph, config, durability)
+
+            assert await _stored(graph, config) == stored
+            assert replay.answers == []
+
+        def when_a_later_resume_answers_the_questions():
+            async def it_dispatches_only_the_later_answers(durability):
+                replay, graph, config = await _paused(False, durability)
+                await _stop_the_replay(replay, graph, config, durability)
+                ids = await _open_ids(graph, config)
+
+                await graph.aresume(
+                    {
+                        ids["first"]: Answered(note="first"),
+                        ids["second"]: Answered(note="second"),
+                    },
+                    config=config,
+                    durability=durability,
+                )
+
+                assert sorted(replay.answers) == ["first", "second"]
+
+        def when_the_stream_resumes():
+            async def it_raises_from_the_stream(durability):
+                replay, graph, config = await _paused(False, durability)
+                ids = await _open_ids(graph, config)
+                replay.armed = True
+
+                async with asyncio.timeout(5):
+                    with pytest.raises(ResumeStoppedError):
+                        async for _ in graph.astream_resume(
+                            {ids["first"]: Answered(), ids["second"]: Answered()},
+                            stop_on=replay.stop,
+                            config=config,
+                            durability=durability,
+                        ):
+                            pass
+
+                assert await _open_ids(graph, config) == ids
+
+    def when_a_replay_finishes_before_the_stop():
+        async def it_keeps_only_the_cut_question_open(durability):
+            replay, graph, config = await _paused(True, durability)
+            ids = await _open_ids(graph, config)
+
+            await _stop_the_replay(replay, graph, config, durability)
+
+            assert await _open_ids(graph, config) == {"first": ids["first"]}
+
+        def when_a_later_resume_answers_the_open_question():
+            async def it_dispatches_each_answer_once(durability):
+                replay, graph, config = await _paused(True, durability)
+                await _stop_the_replay(replay, graph, config, durability)
+                ids = await _open_ids(graph, config)
+
+                await graph.aresume(
+                    {ids["first"]: Answered(note="first")},
+                    config=config,
+                    durability=durability,
+                )
+
+                assert sorted(replay.answers) == ["first", "stopped second"]

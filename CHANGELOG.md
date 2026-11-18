@@ -34,8 +34,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING: a resume turn of `AGUIAdapter.stream()` whose `stop_on=` is already set ends
   with `RUN_FINISHED` and `RunFinishedCancelledOutcome`.** Before, it ended with `RUN_ERROR`.
   It still runs no handler, and the thread keeps its question. Migration: a client that
-  waits for `RUN_ERROR` on this case must read the cancelled outcome. `aresume()` and
-  `astream_resume()` still raise `ValueError`. See #237.
+  waits for `RUN_ERROR` on this case must read the cancelled outcome. See #237.
+- **BREAKING: a stop before a resume applies its answers raises `ResumeStoppedError`.**
+  `aresume()` and `astream_resume()` raise it when `stop_on=` is set at the call, where they
+  raised `ValueError` before. They also raise it when the signal is set during the replay of
+  a paused handler. Before, that stop lost the question and the answer, and the run stored
+  `CancelledOnSignal`. Now the replay step fails, so LangGraph commits no checkpoint, and each
+  cut question stays open with the same interrupt id. A replay that ended before the stop
+  keeps its answer. The writes of the resume command stay: the `HandlerCutOnSignal` records
+  and the `seeds=`, so the client state of a stopped AG-UI turn is stored.
+  `AGUIAdapter.stream()` ends both cases with `RUN_FINISHED` and the cancelled outcome.
+  Migration: catch `ResumeStoppedError` in place of `ValueError`, and resume again to answer
+  the question. See [Stop on a signal](docs/control-flow.md#stop-on-a-signal-cancelledonsignal).
+  See #237.
 - **BREAKING: `AGUIAdapter.stream()` answers a non-empty `RunAgentInput.resume` list itself,
   and does not call the `resume_factory` for it.** A `resolved` entry gives the
   `agui_answer(payload)` of its interrupt. A `cancelled` entry gives `Dismissed`. An entry

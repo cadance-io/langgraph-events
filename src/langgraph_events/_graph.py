@@ -878,12 +878,14 @@ class EventGraph:
         self._require_checkpointer("aresume")
         self._require_resume_event(value)
         signals = _RunSignals(deadline=deadline, pause_on=pause_on, stop_on=stop_on)
-        signals.refuse_set_stop()
+        signals.refuse_set_stop(kwargs.get("config"))
         self._check_run(kwargs)
         snapshot = await self._aresume_snapshot(kwargs, None)
         if not self._resume_is_pending(snapshot):
             return await self._aapply_unresumable_policy(value, kwargs)
-        return await self._arun(resume_command(value, snapshot), signals, **kwargs)
+        return await self._arun(
+            resume_command(value, snapshot), signals.for_resume(snapshot), **kwargs
+        )
 
     @staticmethod
     def _is_interrupted(snapshot: StateSnapshot) -> bool:
@@ -1452,7 +1454,7 @@ class EventGraph:
         self._require_checkpointer("astream_resume")
         self._require_resume_event(value)
         signals = _RunSignals(deadline=deadline, pause_on=pause_on, stop_on=stop_on)
-        signals.refuse_set_stop()
+        signals.refuse_set_stop(kwargs.get("config"))
         self._check_run(kwargs)
         snapshot = await self._aresume_snapshot(kwargs, _snapshot)
         if not self._resume_is_pending(snapshot):
@@ -1470,7 +1472,7 @@ class EventGraph:
             include_llm_tokens=include_llm_tokens,
             include_custom_events=include_custom_events,
             snapshot=snapshot,
-            signals=signals,
+            signals=signals.for_resume(snapshot),
             **kwargs,
         ):
             yield item

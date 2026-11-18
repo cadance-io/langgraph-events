@@ -6226,3 +6226,109 @@ async def _open_ids_by_draft_or_tool(graph: Any, thread_id: str) -> dict[str, st
         getattr(i.value, "draft", None) or i.value.tool_call_id: i.id
         for i in snapshot.interrupts
     }
+
+
+class _StoppedReplay:
+    """A thread paused on two questions, and a resume whose replay stops."""
+
+    def __init__(self, thread_id: str) -> None:
+        self.thread_id = thread_id
+        self.stop = asyncio.Event()
+        self.armed = False
+        self.answered: list[tuple[str, bool]] = []
+        focus = ScalarReducer[FrontendStateMutated, str](
+            name="focus",
+            event_type=FrontendStateMutated,
+            fn=lambda e: e.state.get("focus", SKIP),
+        )
+
+        @on(UserAsked)
+        async def ask_first(event: UserAsked) -> ApprovalRequested:
+            if self.armed:
+                self.stop.set()
+                await asyncio.sleep(100)
+            return ApprovalRequested(draft="first")
+
+        @on(UserAsked)
+        async def ask_second(event: UserAsked) -> ApprovalRequested:
+            if self.armed:
+                await asyncio.sleep(100)
+            return ApprovalRequested(draft="second")
+
+        @on(ApprovalGiven)
+        def record(event: ApprovalGiven) -> None:
+            self.answered.append((event.draft, event.approved))
+
+        self.graph = _graph(
+            ask_first,
+            ask_second,
+            record,
+            reducers=[message_reducer(), focus],
+            checkpointer=MemorySaver(),
+        )
+
+    async def pause(self) -> dict[str, str]:
+        await self.graph.ainvoke(
+            UserAsked(question="go"), config=_config(self.thread_id)
+        )
+        return await _open_ids_by_draft(self.graph, self.thread_id)
+
+    def answer_both(self, ids: dict[str, str], focus: str) -> RunAgentInput:
+        return _make_input(
+            thread_id=self.thread_id,
+            state={"focus": focus},
+            resume=[
+                _resolved(ids["first"], {"approved": True}),
+                _resolved(ids["second"], {"approved": True}),
+            ],
+        )
+
+    async def stopped_run(self, ids: dict[str, str]) -> list[BaseEvent]:
+        self.armed = True
+        async with asyncio.timeout(5):
+            events = [
+                e
+                async for e in _adapter(self.graph).stream(
+                    self.answer_both(ids, "stopped"), stop_on=self.stop
+                )
+            ]
+        self.armed = False
+        return events
+
+
+def describe_a_stop_during_the_replay_of_the_questions():
+    def when_the_resume_list_answers_two_questions():
+        async def it_ends_cancelled_and_stores_no_answer():
+            replay = _StoppedReplay("r-stop")
+            ids = await replay.pause()
+
+            events = await replay.stopped_run(ids)
+
+            assert events[-1].outcome == RunFinishedCancelledOutcome()
+            assert RunErrorEvent not in [type(e) for e in events]
+            assert await _open_ids_by_draft(replay.graph, "r-stop") == ids
+            assert replay.answered == []
+
+        async def it_keeps_the_client_state_of_the_stopped_run():
+            replay = _StoppedReplay("r-state")
+            ids = await replay.pause()
+
+            await replay.stopped_run(ids)
+
+            state = await replay.graph.compiled.aget_state(_config("r-state"))
+            assert state.values["focus"] == "stopped"
+
+        def when_a_later_run_answers_them():
+            async def it_dispatches_only_the_later_answers():
+                replay = _StoppedReplay("r-later")
+                ids = await replay.pause()
+                await replay.stopped_run(ids)
+
+                events = await _stream(replay.graph, replay.answer_both(ids, "kept"))
+                state = await replay.graph.compiled.aget_state(_config("r-later"))
+
+                assert events[-1] == RunFinishedEvent(
+                    thread_id="r-later", run_id="run-1"
+                )
+                assert sorted(replay.answered) == [("first", True), ("second", True)]
+                assert state.values["focus"] == "kept"

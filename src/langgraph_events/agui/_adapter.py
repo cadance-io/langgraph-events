@@ -28,8 +28,7 @@ from ag_ui.core import (
 from langgraph_events._event import CancelledOnSignal, Event, Interrupted
 from langgraph_events._graph import _snapshot_interrupts
 from langgraph_events._pause import _FRAMEWORK_KEY_PREFIX
-from langgraph_events._run_signals import _RunSignals
-from langgraph_events._stop import ResumeValue, stop_is_set
+from langgraph_events._run_signals import ResumeStoppedError, _RunSignals
 from langgraph_events.stream import (
     CustomEventFrame,
     InterruptFrame,
@@ -79,6 +78,7 @@ if TYPE_CHECKING:
     from langgraph.types import StateSnapshot
 
     from langgraph_events._graph import EventGraph
+    from langgraph_events._stop import ResumeValue
     from langgraph_events._types import PauseSignal
 
     from ._protocols import EventMapper, ResumeFactory, SeedFactory
@@ -747,11 +747,7 @@ class AGUIAdapter:
         config: RunnableConfig,
         context: object,
     ) -> AsyncIterator[_RunItem]:
-        """Stream domain events through the mapper chain.
-
-        A resume turn whose ``stop_on=`` is already set runs nothing. It ends
-        with the cancelled outcome, and the thread keeps its question.
-        """
+        """Stream domain events through the mapper chain."""
         # Determine resume vs fresh run — lazy checkpoint read
         needs_checkpoint = (
             self._seed_accepts_state
@@ -787,9 +783,6 @@ class AGUIAdapter:
         if self._should_gate_with_checkpoint_replay(resume_event, checkpoint_state):
             for agui_event in self._checkpoint_events(checkpoint_snapshot, ctx):
                 yield agui_event
-            return
-        if is_resume and stop_is_set(config):
-            yield RunFinishedCancelledOutcome()
             return
 
         event_stream = await self._build_event_stream(
@@ -916,8 +909,9 @@ class AGUIAdapter:
             stop_on: An object with ``is_set()``, as
                 :meth:`EventGraph.ainvoke` describes it.  The stream then
                 ends on ``RUN_FINISHED`` with ``RunFinishedCancelledOutcome``.
-                A resume turn whose *stop_on* is already set runs no handler
-                and ends the same way. See ``docs/agui.md``, "Run outcomes".
+                A resume turn that the stop cuts before it applies its
+                answers ends the same way, and the thread stays paused. See
+                ``docs/agui.md``, "Run outcomes".
 
         Raises:
             TypeError: *pause_on* or *stop_on* is a class, or has no
@@ -987,6 +981,21 @@ class AGUIAdapter:
                     outcome = agui_event
                 else:
                     yield agui_event
+
+        except ResumeStoppedError:
+            # The stop came before the resume applied its answers. The thread
+            # stays paused on its questions.
+            for message_id in ctx.drain_open_stream_message_ids():
+                yield TextMessageEndEvent(
+                    type=EventType.TEXT_MESSAGE_END,
+                    message_id=message_id,
+                )
+            for tc_id in ctx.drain_open_tool_call_ids():
+                yield ToolCallEndEvent(
+                    type=EventType.TOOL_CALL_END,
+                    tool_call_id=tc_id,
+                )
+            outcome = RunFinishedCancelledOutcome()
 
         except UnmappedEventError:
             # on_unmapped="raise" is a strict CI gate — propagate instead of

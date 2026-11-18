@@ -154,6 +154,7 @@ The return value is checked against the declared annotation, or against the subs
 | Export | Type | Description |
 |---|---|---|
 | `OrphanedEventWarning` | Warning | Issued at graph construction when a return type has no subscriber |
+| `ResumeStoppedError` | RuntimeError subclass | Raised by `aresume()` and `astream_resume()` when the `stop_on=` signal stops the resume before it applies its answers: the signal is set at the call, or during the replay of a paused handler. Each cut question stays open with the same interrupt id. See [Stop on a signal](control-flow.md#stop-on-a-signal-cancelledonsignal) |
 | `UnresumableError` | RuntimeError subclass | Raised by `resume()` under the default `EventGraph(on_unresumable="raise")` when the thread is not paused. A thread is paused while its checkpoint has a scheduled node or a pending interrupt of a registered handler. Causes: the paused handler was renamed or removed, the thread already finished, a double resume, or a thread settled by [`abandon()`](control-flow.md#ending-a-pause-without-answering-it-abandon). Declare `@on(previously=...)` to recover, or set `on_unresumable="halt"` or `"warn"`. See [Handler renames](event-migrations.md#handler-renames) |
 | `DomainPatternWarning` | Warning | Two or more events of one namespace fan out to an identical target set. See [Control Flow](control-flow.md) |
 | `CommandChainWarning` | Warning | An inline command handler emits another `Command`, a `chain`-causation edge. See [Control Flow](control-flow.md) |

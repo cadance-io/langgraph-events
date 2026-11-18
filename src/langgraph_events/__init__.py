@@ -84,6 +84,7 @@ from langgraph_events._reducer import (
 from langgraph_events._reflection import QueryTool, Reflection
 from langgraph_events._retry import RetryPolicy
 from langgraph_events._rewrite import RewriteReport, ThreadRewrite
+from langgraph_events._run_signals import ResumeStoppedError
 from langgraph_events._services import RunScoped
 from langgraph_events._store import EventStore
 from langgraph_events._topology import EventTopology, OrphanedEventWarning
@@ -168,6 +169,7 @@ __all__ = [
     "Reducer",
     "ReducerNotSetError",
     "Reflection",
+    "ResumeStoppedError",
     "Resumed",
     "RetryPolicy",
     "RewriteReport",
