@@ -132,10 +132,13 @@ class InterruptFrame(NamedTuple):
     new item type.
 
     ``value`` is the payload of the interrupt. For a handler that returns an
-    :class:`Interrupted` event, the value is that event.
+    :class:`Interrupted` event, the value is that event. ``interrupt_id`` is
+    the LangGraph id of the interrupt. It stays the same until a resume
+    answers the interrupt.
     """
 
     value: Any
+    interrupt_id: str
 
 
 class StateSnapshotFrame(NamedTuple):
@@ -1159,7 +1162,9 @@ class EventGraph:
             after = await self.compiled.aget_state(config)
             interrupts = _snapshot_interrupts(after)
         return [
-            InterruptFrame(value=i.value) for i in interrupts if i.value is not None
+            InterruptFrame(value=i.value, interrupt_id=i.id)
+            for i in interrupts
+            if i.value is not None
         ]
 
     def _stream_sync(

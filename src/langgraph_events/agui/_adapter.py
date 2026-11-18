@@ -15,6 +15,7 @@ from ag_ui.core import (
     RunErrorEvent,
     RunFinishedCancelledOutcome,
     RunFinishedEvent,
+    RunFinishedInterruptOutcome,
     RunStartedEvent,
     TextMessageContentEvent,
     TextMessageEndEvent,
@@ -28,6 +29,7 @@ from langgraph_events._event import CancelledOnSignal, Event, Interrupted
 from langgraph_events._graph import _snapshot_interrupts
 from langgraph_events._pause import _FRAMEWORK_KEY_PREFIX
 from langgraph_events._run_signals import _RunSignals
+from langgraph_events._stop import stop_is_set
 from langgraph_events.stream import (
     CustomEventFrame,
     InterruptFrame,
@@ -49,6 +51,7 @@ from ._mappers import (
     build_messages_snapshot,
     build_state_snapshot,
     default_mappers,
+    interrupt_outcome,
 )
 from ._state import _DEDICATED_EVENT_KEYS, _default_state_projection
 
@@ -83,7 +86,8 @@ if TYPE_CHECKING:
 _SERVER_ONLY_KEYS = frozenset({"thread_id", "checkpoint_id", "checkpoint_ns"})
 """The ``configurable`` keys that a client cannot set. They choose a checkpoint."""
 
-type _RunItem = BaseEvent | RunFinishedCancelledOutcome
+type _Outcome = RunFinishedCancelledOutcome | RunFinishedInterruptOutcome
+type _RunItem = BaseEvent | _Outcome
 
 
 class _FactoryRefusalError(Exception):
@@ -352,6 +356,7 @@ class AGUIAdapter:
 
         The replay is one AG-UI run. It starts with ``RUN_STARTED`` and ends
         with ``RUN_FINISHED``, or with ``RUN_ERROR`` when the replay raises.
+        On a paused thread, ``RUN_FINISHED`` carries the interrupt outcome.
 
         Args:
             input_data: AG-UI ``RunAgentInput``.
@@ -394,20 +399,30 @@ class AGUIAdapter:
     async def _replay(
         self,
         config: RunnableConfig,
-        events: Callable[[StateSnapshot | None], Iterable[BaseEvent]],
-    ) -> AsyncIterator[BaseEvent]:
+        events: Callable[[StateSnapshot | None], Iterable[_RunItem]],
+    ) -> AsyncIterator[_RunItem]:
         for agui_event in events(await self._aget_checkpoint_snapshot(config)):
             yield agui_event
 
     def _checkpoint_events(
         self, checkpoint: StateSnapshot | None, ctx: MapperContext
-    ) -> Iterator[BaseEvent]:
-        """Yield the snapshots, then the pending interrupts, of *checkpoint*."""
+    ) -> Iterator[_RunItem]:
+        """Yield the snapshots, then the pending interrupts, of *checkpoint*.
+
+        The last item is the interrupt outcome, when an interrupt is open.
+        """
         yield from self._snapshot_events(checkpoint)
         if checkpoint is None:
             return
         for interrupted in self._interrupts_from_snapshot(checkpoint):
             yield from self._map_event(interrupted, ctx)
+        outcome = interrupt_outcome(
+            (i.id, i.value)
+            for i in _snapshot_interrupts(checkpoint)
+            if i.value is not None
+        )
+        if outcome is not None:
+            yield outcome
 
     def _snapshot_events(self, checkpoint: StateSnapshot | None) -> list[BaseEvent]:
         channels = (
@@ -482,7 +497,6 @@ class AGUIAdapter:
         config: RunnableConfig,
         snapshot: StateSnapshot | None,
         context: object,
-        signals: _RunSignals,
     ) -> AsyncIterator[StreamItem]:
         """Resume path that routes ``FrontendStateMutated`` through both
         reducer dispatch and the LangGraph channel state.
@@ -503,7 +517,6 @@ class AGUIAdapter:
         seeds are dispatched out-of-graph.  Use ``@on(Resumed)`` for
         resume-time side effects.
         """
-        signals.refuse_set_stop()
         fsm = self._build_resume_frontend_state_event(input_data)
         if fsm is not None:
             await self._commit_resume_frontend_state(fsm, config)
@@ -578,7 +591,6 @@ class AGUIAdapter:
         config: RunnableConfig,
         snapshot: StateSnapshot | None,
         context: object,
-        signals: _RunSignals,
     ) -> AsyncIterator[StreamItem]:
         """Create the underlying EventGraph async event stream.
 
@@ -587,7 +599,7 @@ class AGUIAdapter:
         """
         if resume_event is not None:
             return self._resume_event_stream(
-                input_data, resume_event, config, snapshot, context, signals
+                input_data, resume_event, config, snapshot, context
             )
         seed: Event | list[Event] = await _call_factory(
             self._seed_factory,
@@ -738,9 +750,12 @@ class AGUIAdapter:
         ctx: MapperContext,
         config: RunnableConfig,
         context: object,
-        signals: _RunSignals,
     ) -> AsyncIterator[_RunItem]:
-        """Stream domain events through the mapper chain."""
+        """Stream domain events through the mapper chain.
+
+        A resume turn whose ``stop_on=`` is already set runs nothing. It ends
+        with the cancelled outcome, and the thread keeps its question.
+        """
         # Determine resume vs fresh run — lazy checkpoint read
         needs_checkpoint = (
             self._seed_accepts_state
@@ -773,6 +788,9 @@ class AGUIAdapter:
             for agui_event in self._checkpoint_events(checkpoint_snapshot, ctx):
                 yield agui_event
             return
+        if is_resume and stop_is_set(config):
+            yield RunFinishedCancelledOutcome()
+            return
 
         event_stream = await self._build_event_stream(
             input_data,
@@ -781,9 +799,9 @@ class AGUIAdapter:
             config,
             checkpoint_snapshot,
             context,
-            signals,
         )
 
+        pending: list[InterruptFrame] = []
         async for item in event_stream:
             if isinstance(item, LLMToken):
                 for agui_event in self._events_from_llm_token(item, ctx):
@@ -803,6 +821,7 @@ class AGUIAdapter:
                     value=item.data,
                 )
             elif isinstance(item, InterruptFrame):
+                pending.append(item)
                 for agui_event in self._map_event(item.value, ctx):
                     yield agui_event
             elif isinstance(item, StreamFrame):
@@ -838,6 +857,9 @@ class AGUIAdapter:
                 type=EventType.TOOL_CALL_END,
                 tool_call_id=tc_id,
             )
+        outcome = interrupt_outcome((f.interrupt_id, f.value) for f in pending)
+        if outcome is not None:
+            yield outcome
 
     def stream(
         self,
@@ -894,7 +916,8 @@ class AGUIAdapter:
             stop_on: An object with ``is_set()``, as
                 :meth:`EventGraph.ainvoke` describes it.  The stream then
                 ends on ``RUN_FINISHED`` with ``RunFinishedCancelledOutcome``.
-                See ``docs/control-flow.md``, "Stop on a signal".
+                A resume turn whose *stop_on* is already set runs no handler
+                and ends the same way. See ``docs/agui.md``, "Run outcomes".
 
         Raises:
             TypeError: *pause_on* or *stop_on* is a class, or has no
@@ -922,7 +945,7 @@ class AGUIAdapter:
         )
         return self._as_run(
             ctx,
-            self._stream_event_source(input_data, ctx, run_config, context, signals),
+            self._stream_event_source(input_data, ctx, run_config, context),
         )
 
     @staticmethod
@@ -954,10 +977,13 @@ class AGUIAdapter:
             run_id=ctx.run_id,
         )
 
-        outcome: RunFinishedCancelledOutcome | None = None
+        outcome: _Outcome | None = None
         try:
             async for agui_event in source:
-                if isinstance(agui_event, RunFinishedCancelledOutcome):
+                if isinstance(
+                    agui_event,
+                    (RunFinishedCancelledOutcome, RunFinishedInterruptOutcome),
+                ):
                     outcome = agui_event
                 else:
                     yield agui_event

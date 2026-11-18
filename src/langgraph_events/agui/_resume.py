@@ -9,10 +9,11 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from ._errors import RunRefusedError
 from ._extras import AGUI_HELD_PARTS_KEY, capped_slot, collect_inbound_extras
 
 if TYPE_CHECKING:
-    from ag_ui.core import InputContentPart, Message
+    from ag_ui.core import InputContentPart, Message, ResumeEntry
     from ag_ui.core.types import RunAgentInput
     from langchain_core.messages import BaseMessage
     from langchain_core.messages.tool_call import ToolCall as LCToolCall
@@ -258,13 +259,21 @@ def detect_new_frontend_messages(
 
 
 def extract_resume_input(input_data: RunAgentInput) -> Any:  # noqa: ANN401 - decoded JSON value, callers index it
-    """Pull resume input from ``RunAgentInput.forwarded_props.command.resume``.
+    """Pull the resume input from ``RunAgentInput``.
 
-    If the value is a string, attempts ``json.loads`` (returns the decoded
-    JSON value on success; the raw string on ``JSONDecodeError``). Dicts,
-    lists, and numbers pass through unchanged. Returns ``None`` if absent or
-    falsy.
+    An AG-UI 1.0 client sends the answer in ``RunAgentInput.resume``. The
+    list must then hold one entry with the status ``resolved``, and the
+    result is its ``payload``. A resume run answers one interrupt, so another
+    list raises :class:`RunRefusedError` with the code ``unsupported_resume``.
+
+    With no ``resume`` list, the input comes from
+    ``forwarded_props.command.resume``. If the value is a string, attempts
+    ``json.loads`` (returns the decoded JSON value on success; the raw string
+    on ``JSONDecodeError``). Dicts, lists, and numbers pass through unchanged.
+    Returns ``None`` if absent or falsy.
     """
+    if input_data.resume:
+        return _resolved_payload(input_data.resume)
     forwarded = input_data.forwarded_props or {}
     resume = (forwarded.get("command") or {}).get("resume")
     if not resume:
@@ -275,3 +284,16 @@ def extract_resume_input(input_data: RunAgentInput) -> Any:  # noqa: ANN401 - de
         except json.JSONDecodeError:
             return resume
     return resume
+
+
+def _resolved_payload(entries: list[ResumeEntry]) -> Any:  # noqa: ANN401 - the answer of the client
+    """The payload of the one ``resolved`` entry in *entries*."""
+    match entries:
+        case [entry] if entry.status == "resolved":
+            return entry.payload
+    statuses = [entry.status for entry in entries]
+    raise RunRefusedError(
+        "unsupported_resume",
+        "A resume run answers one interrupt. Send one resume entry with the "
+        f"status 'resolved', not the statuses {statuses!r}.",
+    )

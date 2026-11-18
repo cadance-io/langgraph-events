@@ -18,15 +18,18 @@ from ag_ui.core import (
     EventType,
     FileSource,
     ImagePart,
+    ResumeEntry,
     RunAgentInput,
     RunErrorEvent,
     RunFinishedCancelledOutcome,
     RunFinishedEvent,
+    RunFinishedInterruptOutcome,
     TextPart,
     Tool,
     UrlSource,
     VideoPart,
 )
+from ag_ui.core import Interrupt as AguiInterrupt
 from ag_ui.core import ToolMessage as AguiToolMessage
 from ag_ui.core import UserMessage as AguiUserMessage
 from conftest import Counted, LoadCountingSaver, count_to_twenty
@@ -75,6 +78,7 @@ from langgraph_events.agui import (
     agui_messages_to_langchain,
     build_langchain_tools,
     detect_new_tool_results,
+    extract_resume_input,
     held_parts,
 )
 from langgraph_events.agui._mappers import _warned_classes, _warned_extras
@@ -1366,7 +1370,7 @@ def describe_AGUIAdapter():
 
             def when_a_sibling_handler_interrupts_in_the_same_round():
 
-                async def it_emits_the_interrupt_and_finishes_normally():
+                async def it_sends_the_interrupt_outcome():
                     stop = asyncio.Event()
 
                     @on(UserAsked)
@@ -1389,8 +1393,15 @@ def describe_AGUIAdapter():
                     assert [e.value for e in _custom(events, "interrupted")] == [
                         {"draft": "draft"}
                     ]
-                    assert events[-1] == RunFinishedEvent(
-                        thread_id="t-stop-ask", run_id=events[-1].run_id
+                    (interrupt_id,) = await _open_interrupt_ids(graph, "t-stop-ask")
+                    assert events[-1].outcome == RunFinishedInterruptOutcome(
+                        interrupts=[
+                            AguiInterrupt(
+                                id=interrupt_id,
+                                reason="ApprovalRequested",
+                                metadata={"payload": {"draft": "draft"}},
+                            )
+                        ]
                     )
 
                 def when_the_next_turn_resumes_the_interrupt():
@@ -1489,29 +1500,43 @@ def describe_AGUIAdapter():
 
                 def when_the_stop_signal_is_already_set():
 
-                    async def it_ends_on_run_error_and_keeps_the_question():
+                    async def it_ends_cancelled_and_keeps_the_question():
+                        answered: list[bool] = []
+
+                        @on(ApprovalGiven)
+                        def record(event: ApprovalGiven) -> AgentReplied:
+                            answered.append(event.approved)
+                            return AgentReplied(message=AIMessage(content="Approved!"))
+
+                        graph = _graph(ask_approval, record, checkpointer=MemorySaver())
+                        await graph.ainvoke(
+                            UserAsked(question="go"), config=_config("o-stop")
+                        )
+                        before = await graph.aget_state(_config("o-stop"))
+                        stored = await _stored_events(graph, "o-stop")
                         stop = asyncio.Event()
                         stop.set()
-                        graph = _graph(ask_draft, approve, checkpointer=MemorySaver())
-                        await graph.ainvoke(
-                            UserAsked(question="go"), config=_config("t-set-stop")
-                        )
-                        adapter = _adapter(
-                            graph,
-                            resume_factory=lambda inp: ApprovalGiven(approved=True),
-                        )
 
                         events = [
                             event
-                            async for event in adapter.stream(
-                                _make_input(thread_id="t-set-stop"), stop_on=stop
+                            async for event in _adapter(
+                                graph,
+                                resume_factory=lambda inp: ApprovalGiven(approved=True),
+                            ).stream(
+                                _make_input(thread_id="o-stop", state={"focus": "x"}),
+                                stop_on=stop,
                             )
                         ]
-                        state = await graph.aget_state(_config("t-set-stop"))
+                        after = await graph.aget_state(_config("o-stop"))
 
-                        assert type(events[-1]) is RunErrorEvent
-                        assert "stop_on" in events[-1].message
-                        assert state.interrupted is not None
+                        assert _types(events) == [
+                            EventType.RUN_STARTED,
+                            EventType.RUN_FINISHED,
+                        ]
+                        assert events[-1].outcome == RunFinishedCancelledOutcome()
+                        assert after.interrupted == before.interrupted
+                        assert await _stored_events(graph, "o-stop") == stored
+                        assert answered == []
 
         def when_the_stop_signal_is_set_after_the_last_handler():
 
@@ -2515,7 +2540,7 @@ def describe_snapshot():
             await graph.ainvoke(UserAsked(question="go"), config=_config("t-snap"))
             return graph
 
-        async def it_emits_connect_less_the_interrupt_events(graph):
+        async def it_emits_connect_less_the_interrupt_events_and_outcome(graph):
             adapter = _adapter(graph)
             input_data = _make_input(thread_id="t-snap", run_id="run-9")
 
@@ -2530,7 +2555,9 @@ def describe_snapshot():
             ]
             interrupted = _custom(connect, "interrupted")
             assert len(interrupted) == 1
-            assert connect == [*snapshot[:-1], *interrupted, snapshot[-1]]
+            assert connect[:-1] == [*snapshot[:-1], *interrupted]
+            assert connect[-1].outcome.type == "interrupt"
+            assert snapshot[-1].outcome is None
 
     def when_the_interrupt_is_a_frontend_tool_call():
 
@@ -5748,3 +5775,199 @@ def describe_AGUIAdapter_derived_value_that_reads_the_log():
             events = [e async for e in adapter.snapshot(_make_input(thread_id="l-3"))]
 
             assert _state_snapshots(events) == [_state_snapshots(streamed)[-1]]
+
+
+def _approve_from_resume(input_data: RunAgentInput) -> ApprovalGiven | None:
+    """Resume factory that reads the answer through ``extract_resume_input``."""
+    answer = extract_resume_input(input_data)
+    if answer is None:
+        return None
+    return ApprovalGiven(approved=answer["approved"])
+
+
+def _resolved(interrupt_id: str, payload: Any) -> ResumeEntry:
+    return ResumeEntry(interrupt_id=interrupt_id, status="resolved", payload=payload)
+
+
+async def _open_interrupt_ids(graph: Any, thread_id: str) -> list[str]:
+    """The LangGraph ids of the interrupts that the thread holds open."""
+    snapshot = await graph.compiled.aget_state(_config(thread_id))
+    return [i.id for i in snapshot.interrupts]
+
+
+def _interrupt_outcome(*interrupt_ids: str) -> RunFinishedInterruptOutcome:
+    """The outcome of a run paused on ``ask_approval`` once per id."""
+    return RunFinishedInterruptOutcome(
+        interrupts=[
+            AguiInterrupt(
+                id=interrupt_id,
+                reason="ApprovalRequested",
+                metadata={"payload": {"draft": "needs approval"}},
+            )
+            for interrupt_id in interrupt_ids
+        ]
+    )
+
+
+def describe_run_finished_outcome():
+    def when_the_run_pauses_on_an_interrupt():
+        async def it_names_the_question_in_the_interrupt_outcome():
+            graph = _graph(ask_approval, approve, checkpointer=MemorySaver())
+
+            events = await _stream(graph, _make_input(thread_id="o-pause"))
+
+            assert events[-1] == RunFinishedEvent(
+                thread_id="o-pause",
+                run_id="run-1",
+                outcome=_interrupt_outcome(
+                    *await _open_interrupt_ids(graph, "o-pause")
+                ),
+            )
+
+        async def it_keeps_the_interrupted_custom_event():
+            graph = _graph(ask_approval, approve, checkpointer=MemorySaver())
+
+            events = await _stream(graph, _make_input(thread_id="o-custom"))
+
+            assert [e.value for e in _custom(events, "interrupted")] == [
+                {"draft": "needs approval"}
+            ]
+
+        def when_the_interrupt_has_no_agui_mapping():
+            async def it_omits_the_payload():
+                graph = _graph(ask_plain_interrupt, checkpointer=MemorySaver())
+
+                events = await _stream(
+                    graph, _make_input(thread_id="o-plain"), on_unmapped="ignore"
+                )
+
+                assert events[-1].outcome == RunFinishedInterruptOutcome(
+                    interrupts=[
+                        AguiInterrupt(
+                            id=(await _open_interrupt_ids(graph, "o-plain"))[0],
+                            reason="PlainInterrupt",
+                        )
+                    ]
+                )
+
+        def when_the_interrupt_requests_a_frontend_tool_call():
+            async def it_reports_no_outcome():
+                @on(AskConfirm)
+                def request(event: AskConfirm) -> FrontendToolCallRequested:
+                    return FrontendToolCallRequested(
+                        name="confirm", args={}, tool_call_id="tc-o-1"
+                    )
+
+                graph = _graph(request, checkpointer=MemorySaver())
+
+                events = await _stream(
+                    graph,
+                    _make_input(thread_id="o-tool"),
+                    seed_factory=lambda inp: AskConfirm(prompt="Ship v1?"),
+                )
+
+                assert events[-1] == RunFinishedEvent(
+                    thread_id="o-tool", run_id="run-1"
+                )
+
+        def when_the_next_run_answers_it_in_the_resume_list():
+            async def it_runs_the_answer_handler():
+                graph = await _paused("o-answer")
+                (interrupt_id,) = await _open_interrupt_ids(graph, "o-answer")
+
+                events = await _stream(
+                    graph,
+                    _make_input(
+                        thread_id="o-answer",
+                        resume=[_resolved(interrupt_id, {"approved": True})],
+                    ),
+                    resume_factory=_approve_from_resume,
+                )
+
+                assert _roled(events, "assistant")[-1].content == "Approved!"
+                assert events[-1] == RunFinishedEvent(
+                    thread_id="o-answer", run_id="run-1"
+                )
+
+        def when_the_resume_list_cancels_the_interrupt():
+            async def it_refuses_the_run_and_keeps_the_question():
+                graph = await _paused("o-cancel")
+                (interrupt_id,) = await _open_interrupt_ids(graph, "o-cancel")
+
+                events = await _stream(
+                    graph,
+                    _make_input(
+                        thread_id="o-cancel",
+                        resume=[
+                            ResumeEntry(interrupt_id=interrupt_id, status="cancelled")
+                        ],
+                    ),
+                    resume_factory=_approve_from_resume,
+                )
+
+                assert _types(events) == [EventType.RUN_STARTED, EventType.RUN_ERROR]
+                assert events[-1].code == "unsupported_resume"
+                assert await _open_interrupt_ids(graph, "o-cancel") == [interrupt_id]
+
+        def when_the_resume_list_answers_two_interrupts():
+            async def it_refuses_the_run():
+                graph = await _paused("o-two")
+
+                events = await _stream(
+                    graph,
+                    _make_input(
+                        thread_id="o-two",
+                        resume=[
+                            _resolved("first", {"approved": True}),
+                            _resolved("second", {"approved": True}),
+                        ],
+                    ),
+                    resume_factory=_approve_from_resume,
+                )
+
+                assert events[-1].code == "unsupported_resume"
+
+        def when_the_next_run_does_not_answer_it():
+            async def it_sends_the_interrupt_outcome_again():
+                graph = await _paused("o-uncovered")
+                interrupt_ids = await _open_interrupt_ids(graph, "o-uncovered")
+
+                events = await _stream(
+                    graph,
+                    _make_input(thread_id="o-uncovered"),
+                    resume_factory=_approve_from_resume,
+                )
+
+                assert events[-1] == RunFinishedEvent(
+                    thread_id="o-uncovered",
+                    run_id="run-1",
+                    outcome=_interrupt_outcome(*interrupt_ids),
+                )
+                assert _roled(events, "assistant") == []
+
+        def when_a_client_connects():
+            async def it_sends_the_interrupt_outcome():
+                graph = await _paused("o-connect")
+                interrupt_ids = await _open_interrupt_ids(graph, "o-connect")
+
+                events = await _connect(graph, _make_input(thread_id="o-connect"))
+
+                assert events[-1] == RunFinishedEvent(
+                    thread_id="o-connect",
+                    run_id="run-1",
+                    outcome=_interrupt_outcome(*interrupt_ids),
+                )
+
+        def when_a_client_reads_a_snapshot():
+            async def it_reports_no_outcome():
+                graph = await _paused("o-snapshot")
+                adapter = _adapter(graph)
+
+                events = [
+                    e
+                    async for e in adapter.snapshot(_make_input(thread_id="o-snapshot"))
+                ]
+
+                assert events[-1] == RunFinishedEvent(
+                    thread_id="o-snapshot", run_id="run-1"
+                )
