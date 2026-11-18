@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: `AGUIAdapter` ends a paused run with the AG-UI 1.0 interrupt outcome.** Before,
+  `RUN_FINISHED` had no outcome, and an AG-UI 1.0 client read the run as a success. Now
+  `RUN_FINISHED` carries `RunFinishedInterruptOutcome`, with one `Interrupt` for each open
+  interrupt. This applies to `stream()`, to its replay of a paused thread, and to `connect()`.
+  `snapshot()` keeps no outcome. A `FrontendToolCallRequested` is not in the outcome. The
+  `interrupted` custom event stays on the wire. Migration: a client that reads `outcome` must
+  accept the interrupt outcome. A client that treats any `outcome` as the cancelled outcome
+  must check `outcome.type`. See [Run outcomes](docs/agui.md#run-outcomes). See #237.
+- **BREAKING: a resume turn of `AGUIAdapter.stream()` whose `stop_on=` is already set ends
+  with `RUN_FINISHED` and `RunFinishedCancelledOutcome`.** Before, it ended with `RUN_ERROR`.
+  It still runs no handler, and the thread keeps its question. Migration: a client that
+  waits for `RUN_ERROR` on this case must read the cancelled outcome. `aresume()` and
+  `astream_resume()` still raise `ValueError`. See #237.
+- `extract_resume_input()` reads `RunAgentInput.resume` first. One entry with the status
+  `resolved` gives its `payload`. Another list raises `RunRefusedError` with the code
+  `unsupported_resume`. Without a `resume` list, it reads `forwarded_props.command.resume`
+  as before. See #237.
+- **BREAKING: `InterruptFrame` has a second field, `interrupt_id`.** It holds the LangGraph id
+  of the interrupt. Migration: code that unpacks the frame as `(value,)` must unpack
+  `(value, interrupt_id)` or read `frame.value`. See #237.
+
 ## [0.53.0] - 2026-11-18
 
 ### Added

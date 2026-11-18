@@ -290,8 +290,9 @@ stopping.set()
 - `CancelledOnSignal.discarded` names each handler whose step the stop cut, joined with `", "`. It is `""` when the signal was set after the last handler step.
 - When a sibling handler interrupts in the same round, the interrupt wins. The thread stores the question and no `CancelledOnSignal`. The resume stores one `HandlerCutOnSignal` for each cut handler, then dispatches the answer. No handler runs on `HandlerCutOnSignal`, and no later `CancelledOnSignal.discarded` names its handler.
 - A stream (`astream_resume()`, `stream_resume()`, `AGUIAdapter.stream()`) does not yield `HandlerCutOnSignal`, because the resume command writes it. Only the stored log shows it.
-- `aresume()`, `astream_resume()` and the resume of `AGUIAdapter.stream()` raise `ValueError` when the signal is already set at the call. The thread stays paused on its question.
-- A signal set while `aresume()` replays the paused handler cuts that replay. The question and the answer are then lost, and `CancelledOnSignal.discarded` names the replayed handler.
+- `aresume()` and `astream_resume()` raise `ValueError` when the signal is already set at the call. The thread stays paused on its question.
+- The resume of `AGUIAdapter.stream()` does not raise when the signal is already set at the call. It runs no handler and ends on `RUN_FINISHED` with `RunFinishedCancelledOutcome`. The thread stays paused on its question. See [Run outcomes](agui.md#run-outcomes).
+- A signal set while a resume replays the paused handler cuts that replay. The question and the answer are then lost, and `CancelledOnSignal.discarded` names the replayed handler. This applies to `aresume()`, `astream_resume()` and the resume of `AGUIAdapter.stream()`.
 - `abandon()` on a thread paused after a cut stores no `HandlerCutOnSignal`. The next run clears the name of the cut handler.
 - The cursor moves past `CancelledOnSignal`, so a new run on the same `thread_id` continues.
 

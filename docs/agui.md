@@ -99,7 +99,7 @@ Outside the chain, the adapter also emits:
 - `StateSnapshotFrame` → `StateSnapshot`.
 - `CustomEventFrame` → `CustomEvent` (name/value passthrough).
 - `InterruptFrame` → its `value` through the mapper chain. The run yields one frame for each interrupt that it leaves pending.
-- Lifecycle: `RunStarted`, `RunFinished`, `RunError` on exception. A handler that raises `RunRefusedError` gets the generic `RunError`, see [Async Factories and Refusals](#async-factories-and-refusals).
+- Lifecycle: `RunStarted`, `RunFinished`, `RunError` on exception. A handler that raises `RunRefusedError` gets the generic `RunError`, see [Async Factories and Refusals](#async-factories-and-refusals). The `outcome` of `RunFinished` tells a paused run and a stopped run from a completed run, see [Run outcomes](#run-outcomes).
 
 ### Shaping client-facing state
 
@@ -205,11 +205,11 @@ So one message can store up to 16 KiB in the two slots.
 
 ## Connect / Reconnect
 
-`connect()`, alias `reconnect()`, runs no handler. It emits `RunStarted`, then `StateSnapshot` and `MessagesSnapshot` from the checkpoint, then each pending `Interrupted` event, then `RunFinished`. If the replay raises, `RunError` ends the stream instead of `RunFinished`. One exception applies: with `on_unmapped="raise"`, an `UnmappedEventError` propagates to the caller and does not become `RunError`. The stream then ends without a terminal event, the same as in `stream()`. An AG-UI client refuses a stream that does not start with `RunStarted`, so do not strip these events. Call `connect` on page load or refresh. Call `stream` only to start or resume execution. Serve it like the Quick Start route: `create_starlette_response(adapter.connect(input_data))`.
+`connect()`, alias `reconnect()`, runs no handler. It emits `RunStarted`, then `StateSnapshot` and `MessagesSnapshot` from the checkpoint, then each pending `Interrupted` event, then `RunFinished`. On a thread paused on an interrupt, `RunFinished` carries the interrupt outcome, see [Run outcomes](#run-outcomes). If the replay raises, `RunError` ends the stream instead of `RunFinished`. One exception applies: with `on_unmapped="raise"`, an `UnmappedEventError` propagates to the caller and does not become `RunError`. The stream then ends without a terminal event, the same as in `stream()`. An AG-UI client refuses a stream that does not start with `RunStarted`, so do not strip these events. Call `connect` on page load or refresh. Call `stream` only to start or resume execution. Serve it like the Quick Start route: `create_starlette_response(adapter.connect(input_data))`.
 
 ### Snapshot while a run holds the thread
 
-`snapshot()` emits the events of `connect()` without the pending interrupts: `RunStarted`, `StateSnapshot`, `MessagesSnapshot`, then `RunFinished`. It takes the same `config=`. Use it when a live run holds the thread, for example after a page refresh during a resume. The live run raises its own interrupts, so `connect()` would show each interrupt two times.
+`snapshot()` emits the events of `connect()` without the pending interrupts: `RunStarted`, `StateSnapshot`, `MessagesSnapshot`, then `RunFinished` with no outcome. It takes the same `config=`. Use it when a live run holds the thread, for example after a page refresh during a resume. The live run raises its own interrupts, so `connect()` would show each interrupt two times.
 
 Replay the state with `snapshot()`, then forward the stream of the live run. `snapshot()` ends with `RunFinished`, so the forwarded stream must start with the `RunStarted` of the live run. The `run_id` of the snapshot run must differ from the `run_id` of the live run.
 
@@ -244,7 +244,7 @@ adapter = AGUIAdapter(graph, seed_factory=seed_factory, mappers=[PlanMapper()])
 
 ## Resume Support
 
-Implement `resume_factory(input_data, checkpoint_state)`. Return an `Event` to trigger `astream_resume()`. Return `None` for a fresh run via `seed_factory`. On a thread paused on an `Interrupted`, `None` instead replays the checkpoint. The adapter emits `StateSnapshot`, `MessagesSnapshot` and each pending `Interrupted`. It does not call `seed_factory`. `checkpoint_state` is optional. A one-argument factory still works. A `resume_factory` can be `async` and can refuse the run, see [Async Factories and Refusals](#async-factories-and-refusals).
+Implement `resume_factory(input_data, checkpoint_state)`. Return an `Event` to trigger `astream_resume()`. Return `None` for a fresh run via `seed_factory`. On a thread paused on an `Interrupted`, `None` instead replays the checkpoint. The adapter emits `StateSnapshot`, `MessagesSnapshot` and each pending `Interrupted`, then `RunFinished` with the interrupt outcome. It does not call `seed_factory`. `checkpoint_state` is optional. A one-argument factory still works. A `resume_factory` can be `async` and can refuse the run, see [Async Factories and Refusals](#async-factories-and-refusals).
 
 ```python
 ...
@@ -410,7 +410,7 @@ def place(event: OrderConfirmed) -> OrderPlaced:
 
 `detect_new_tool_results` covers the frontend-tool-result path of resume. A result the client marks with `error` becomes a LangChain `ToolMessage` with `status="error"`. In the other path, the frontend sends `Command(resume=…)` plus new chat messages. Three helpers cover that path:
 
-- **`extract_resume_input(input_data)`**: decode `RunAgentInput.forwarded_props["command"]["resume"]`. Every falsy value (`0`, `""`, `[]`, `{}`, `False`) means "no resume". For a "deny" signal, send `{"approved": false}`, not bare `false`.
+- **`extract_resume_input(input_data)`**: read the answer of an AG-UI 1.0 client from `RunAgentInput.resume`. The list must hold one entry with the status `resolved`. The result is its `payload`. A resume run answers one interrupt, so another list raises `RunRefusedError` with the code `unsupported_resume`. Without a `resume` list, decode `RunAgentInput.forwarded_props["command"]["resume"]`. Every falsy value (`0`, `""`, `[]`, `{}`, `False`) means "no resume". For a "deny" signal, send `{"approved": false}`, not bare `false`.
 - **`agui_messages_to_langchain(messages, *, drop_invalid_tool_calls=False)`**: convert AG-UI messages (`UserMessage`, `AssistantMessage`, `SystemMessage`, `ToolMessage`, multimodal content included, see [Message field mapping](#message-field-mapping)) to LangChain `BaseMessage`. `ReasoningMessage` and `DeveloperMessage` are skipped at `DEBUG`. `ActivityMessage` and an unknown role raise `ValueError`. With `drop_invalid_tool_calls=True`, a tool call with unparseable JSON args is dropped with a `WARNING`. A `ToolMessage.error` becomes `status="error"`, and extra fields land under `additional_kwargs[AGUI_EXTRAS_KEY]`. A content part with a `file` source lands under `additional_kwargs[AGUI_HELD_PARTS_KEY]`. Use it directly for custom merging, for example in `seed_factory`.
 - **`detect_new_frontend_messages(input_data, checkpoint_state, *, reducer_name="messages", drop_invalid_tool_calls=True)`**: read the stored messages from `checkpoint_state["reducers"][reducer_name]`, then convert only the inbound messages whose id is not stored. Returns a tuple of the new messages only. A stored message wins over an inbound message with the same id, because AG-UI defines `MessagesSnapshot` as the messages that the server owns. If two inbound messages have the same id, the result holds the last copy, at the position of the first copy.
 
@@ -547,7 +547,7 @@ stream = adapter.stream(input_data, context=RunFacts(language="fr"))
 
 `stream()` accepts `deadline=`, an absolute `time.monotonic()` reference, and `pause_on=`, an object with `is_set()` such as an `asyncio.Event`. The router emits a `RunPausedOnDeadline` or a `RunPausedOnSignal`, both `RunPaused` subclasses, and the run finalises through the same `RunFinishedEvent` path as a normal completion. See [Control Flow → Deadline pause](control-flow.md#soft-timeout-runpaused) and [Control Flow → Pause on a signal](control-flow.md#pause-on-a-signal-runpausedonsignal) for the semantics and the resume rule.
 
-`stream()` also accepts `stop_on=`, an object with `is_set()`. When it is set, the run cancels its running async handler, stores `CancelledOnSignal` and ends the stream with `RUN_FINISHED`. That `RUN_FINISHED` carries the outcome `RunFinishedCancelledOutcome`. `CancelledOnSignal` still goes through the mapper chain, so an `EventMapper` can put it on the wire. Its default mapping emits no event, so `on_unmapped=` never warns or raises for it. When a sibling handler interrupts in the same round, the run stores no `CancelledOnSignal`, and `RUN_FINISHED` has no outcome. A resume turn whose `stop_on=` is already set ends with `RUN_ERROR`, and the thread stays paused. A resume stores a `HandlerCutOnSignal` for each handler that the stop cut before the interrupt. The stream does not yield it, so no mapper sees it. For the cleanup grace period, see [Control Flow → Stop on a signal](control-flow.md#stop-on-a-signal-cancelledonsignal).
+`stream()` also accepts `stop_on=`, an object with `is_set()`. When it is set, the run cancels its running async handler, stores `CancelledOnSignal` and ends the stream with `RUN_FINISHED`. That `RUN_FINISHED` carries the outcome `RunFinishedCancelledOutcome`. `CancelledOnSignal` still goes through the mapper chain, so an `EventMapper` can put it on the wire. Its default mapping emits no event, so `on_unmapped=` never warns or raises for it. When a sibling handler interrupts in the same round, the run stores no `CancelledOnSignal`, and `RUN_FINISHED` carries the interrupt outcome. A resume turn whose `stop_on=` is already set runs no handler. It ends with `RUN_FINISHED` and the cancelled outcome, and the thread stays paused. A resume stores a `HandlerCutOnSignal` for each handler that the stop cut before the interrupt. The stream does not yield it, so no mapper sees it. For the cleanup grace period, see [Control Flow → Stop on a signal](control-flow.md#stop-on-a-signal-cancelledonsignal).
 
 `RunPaused` does not implement `AGUISerializable`, so `FallbackMapper` skips it with a one-time warning. An app that wants to send a pause signal to the client registers its own mapper:
 
@@ -571,6 +571,34 @@ class PauseMapper:
 
 adapter = AGUIAdapter(graph, seed_factory=..., mappers=[PauseMapper()])
 ```
+
+## Run outcomes
+
+AG-UI 1.0 reads the `outcome` of `RUN_FINISHED`. An absent outcome means that the run completed. The adapter sets the outcome as follows:
+
+| The run ends | `RUN_FINISHED.outcome` |
+|---|---|
+| Completed | Absent |
+| Paused on one or more interrupts | `RunFinishedInterruptOutcome` |
+| Paused on a `FrontendToolCallRequested` only | Absent |
+| Stopped by `stop_on=` | `RunFinishedCancelledOutcome` |
+| A resume turn whose `stop_on=` is already set | `RunFinishedCancelledOutcome` |
+
+The interrupt outcome holds one `Interrupt` for each open interrupt of the thread, in checkpoint task order:
+
+| `Interrupt` field | Value |
+|---|---|
+| `id` | The LangGraph id of the interrupt. It stays the same until a resume answers the interrupt. |
+| `reason` | The class name of the interrupt value, for example `ApprovalRequested` |
+| `metadata` | `{"payload": ...}`, with the value of the `interrupted` custom event. It is absent when the value has no AG-UI mapping. |
+
+The adapter also sends the `interrupted` custom event, as before. A client that reads the custom event keeps working. A 1.0 client reads the outcome.
+
+A `FrontendToolCallRequested` is a frontend tool call, not an interrupt. AG-UI 1.0 ends such a run as a success. The client answers the call with a tool message in the next input, and it finds the open call in the `TOOL_CALL_START` events. So the outcome does not name it. When a real interrupt is also open, the outcome names only the real interrupt.
+
+A 1.0 client sends its answer in `RunAgentInput.resume`. Read it with [`extract_resume_input`](#resume-helpers) in the `resume_factory`. A run on a paused thread whose `resume_factory` returns `None` runs no handler. It ends with the interrupt outcome again, so the client gets another chance to answer. A cancelled run waits for nothing, so a 1.0 client clears its pending interrupts. The next run then sends no answer and gets the interrupt outcome again.
+
+WARNING: a `stop_on=` signal set after the resume turn starts, and before the replayed paused handler commits, cuts that replay. The thread then loses the question and the answer, and the run ends with the cancelled outcome. To keep the question, set the stop before the resume turn starts. See [Stop on a signal](control-flow.md#stop-on-a-signal-cancelledonsignal).
 
 ## AG-UI Spec Coverage
 
