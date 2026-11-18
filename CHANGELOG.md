@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.54.0] - 2026-11-18
+
 ### Added
 
 - `resume()`, `aresume()`, `stream_resume()` and `astream_resume()` accept a mapping of
@@ -2578,7 +2580,8 @@ stale pending state. Any completed sibling write from a fanned-out superstep sur
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.53.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.54.0...HEAD
+[0.54.0]: https://github.com/cadance-io/langgraph-events/compare/v0.53.0...v0.54.0
 [0.53.0]: https://github.com/cadance-io/langgraph-events/compare/v0.52.0...v0.53.0
 [0.52.0]: https://github.com/cadance-io/langgraph-events/compare/v0.51.1...v0.52.0
 [0.51.1]: https://github.com/cadance-io/langgraph-events/compare/v0.51.0...v0.51.1
