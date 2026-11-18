@@ -70,6 +70,7 @@ BUILDERS: dict[str, Callable[[type], dict[str, object]]] = {
     "Abandoned": _one(reason="stale", discarded="Approval"),
     "Cancelled": _one(),
     "CancelledOnSignal": _one(discarded="work"),
+    "Dismissed": _one(interrupted=lge.Interrupted()),
     "Halted": _one(),
     "HandlerAbandonedOnDeadline": _one(**_raised()),
     "HandlerAbandonedOnSignal": _one(**_raised()),

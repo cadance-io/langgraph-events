@@ -51,6 +51,7 @@ from langgraph_events import (
     SKIP,
     CancelledOnSignal,
     Derived,
+    Dismissed,
     Event,
     EventGraph,
     EventLog,
@@ -135,6 +136,9 @@ class ApprovalRequested(Interrupted):
     def agui_dict(self) -> dict[str, Any]:
         return {"draft": self.draft}
 
+    def agui_answer(self, payload: Any) -> ApprovalGiven:
+        return ApprovalGiven(approved=payload["approved"], draft=self.draft)
+
 
 class PlainInterrupt(Interrupted):
     """An Interrupted subclass with no AG-UI mapping (no agui_dict())."""
@@ -166,6 +170,7 @@ class Note(BaseModel):
 
 class ApprovalGiven(IntegrationEvent):
     approved: bool = True
+    draft: str = ""
 
     def agui_dict(self) -> dict[str, Any]:
         return {"approved": self.approved}
@@ -5795,6 +5800,12 @@ async def _open_interrupt_ids(graph: Any, thread_id: str) -> list[str]:
     return [i.id for i in snapshot.interrupts]
 
 
+async def _open_ids_by_draft(graph: Any, thread_id: str) -> dict[str, str]:
+    """The open interrupt ids of the thread, keyed by the draft of the question."""
+    snapshot = await graph.compiled.aget_state(_config(thread_id))
+    return {i.value.draft: i.id for i in snapshot.interrupts}
+
+
 def _interrupt_outcome(*interrupt_ids: str) -> RunFinishedInterruptOutcome:
     """The outcome of a run paused on ``ask_approval`` once per id."""
     return RunFinishedInterruptOutcome(
@@ -5881,7 +5892,6 @@ def describe_run_finished_outcome():
                         thread_id="o-answer",
                         resume=[_resolved(interrupt_id, {"approved": True})],
                     ),
-                    resume_factory=_approve_from_resume,
                 )
 
                 assert _roled(events, "assistant")[-1].content == "Approved!"
@@ -5901,7 +5911,6 @@ def describe_run_finished_outcome():
                             thread_id="o-unknown",
                             resume=[_resolved("not-open", {"approved": True})],
                         ),
-                        resume_factory=_approve_from_resume,
                     )
 
                 assert events[-1] == RunFinishedEvent(
@@ -5915,8 +5924,17 @@ def describe_run_finished_outcome():
                 ]
 
         def when_the_resume_list_cancels_the_interrupt():
-            async def it_refuses_the_run_and_keeps_the_question():
-                graph = await _paused("o-cancel")
+            async def it_dispatches_the_dismissal_of_the_question():
+                dismissed: list[str] = []
+
+                @on(Dismissed, interrupted=ApprovalRequested)
+                def note(event: Dismissed, interrupted: ApprovalRequested) -> None:
+                    dismissed.append(interrupted.draft)
+
+                graph = _graph(ask_approval, note, checkpointer=MemorySaver())
+                await graph.ainvoke(
+                    UserAsked(question="go"), config=_config("o-cancel")
+                )
                 (interrupt_id,) = await _open_interrupt_ids(graph, "o-cancel")
 
                 events = await _stream(
@@ -5927,31 +5945,55 @@ def describe_run_finished_outcome():
                             ResumeEntry(interrupt_id=interrupt_id, status="cancelled")
                         ],
                     ),
-                    resume_factory=_approve_from_resume,
                 )
 
-                assert _types(events) == [EventType.RUN_STARTED, EventType.RUN_ERROR]
-                assert events[-1].code == "unsupported_resume"
-                assert await _open_interrupt_ids(graph, "o-cancel") == [interrupt_id]
+                assert dismissed == ["needs approval"]
+                assert events[-1] == RunFinishedEvent(
+                    thread_id="o-cancel", run_id="run-1"
+                )
 
-        def when_the_resume_list_holds_two_entries():
-            async def it_refuses_the_run():
-                graph = await _paused("o-two")
-                (interrupt_id,) = await _open_interrupt_ids(graph, "o-two")
+        def when_the_resume_list_names_one_interrupt_two_times():
+            async def it_refuses_the_run_and_keeps_the_question():
+                graph = await _paused("o-twice")
+                (interrupt_id,) = await _open_interrupt_ids(graph, "o-twice")
 
                 events = await _stream(
                     graph,
                     _make_input(
-                        thread_id="o-two",
+                        thread_id="o-twice",
                         resume=[
                             _resolved(interrupt_id, {"approved": True}),
                             _resolved(interrupt_id, {"approved": False}),
                         ],
                     ),
-                    resume_factory=_approve_from_resume,
                 )
 
-                assert events[-1].code == "unsupported_resume"
+                assert _types(events) == [EventType.RUN_STARTED, EventType.RUN_ERROR]
+                assert events[-1].code == "duplicate_resume_entry"
+                assert await _open_interrupt_ids(graph, "o-twice") == [interrupt_id]
+
+        def when_the_question_cannot_read_an_answer():
+            async def it_refuses_the_run_and_keeps_the_question():
+                graph = _graph(ask_plain_interrupt, checkpointer=MemorySaver())
+                await graph.ainvoke(
+                    UserAsked(question="go"), config=_config("o-plain-answer")
+                )
+                (interrupt_id,) = await _open_interrupt_ids(graph, "o-plain-answer")
+
+                events = await _stream(
+                    graph,
+                    _make_input(
+                        thread_id="o-plain-answer",
+                        resume=[_resolved(interrupt_id, {"approved": True})],
+                    ),
+                    on_unmapped="ignore",
+                )
+
+                assert _types(events) == [EventType.RUN_STARTED, EventType.RUN_ERROR]
+                assert events[-1].code == "unanswerable_interrupt"
+                assert await _open_interrupt_ids(graph, "o-plain-answer") == [
+                    interrupt_id
+                ]
 
         def when_the_next_run_does_not_answer_it():
             async def it_sends_the_interrupt_outcome_again():
@@ -5997,3 +6039,92 @@ def describe_run_finished_outcome():
                 assert events[-1] == RunFinishedEvent(
                     thread_id="o-snapshot", run_id="run-1"
                 )
+
+    def when_the_run_pauses_on_two_interrupts():
+        def when_the_resume_list_answers_both():
+            async def it_dispatches_both_answers():
+                answered: list[tuple[str, bool]] = []
+
+                @on(ApprovalGiven)
+                def record(event: ApprovalGiven) -> None:
+                    answered.append((event.draft, event.approved))
+
+                graph = _graph(
+                    ask_approval, ask_draft, record, checkpointer=MemorySaver()
+                )
+                await graph.ainvoke(UserAsked(question="go"), config=_config("o-both"))
+                ids = await _open_ids_by_draft(graph, "o-both")
+
+                events = await _stream(
+                    graph,
+                    _make_input(
+                        thread_id="o-both",
+                        resume=[
+                            _resolved(ids["needs approval"], {"approved": True}),
+                            _resolved(ids["draft"], {"approved": False}),
+                        ],
+                    ),
+                )
+
+                assert sorted(answered) == [
+                    ("draft", False),
+                    ("needs approval", True),
+                ]
+                assert events[-1] == RunFinishedEvent(
+                    thread_id="o-both", run_id="run-1"
+                )
+
+        def when_the_resume_list_answers_one():
+            async def it_sends_the_interrupt_outcome_for_the_other():
+                graph = _graph(ask_approval, ask_draft, checkpointer=MemorySaver())
+                await graph.ainvoke(UserAsked(question="go"), config=_config("o-part"))
+                ids = await _open_ids_by_draft(graph, "o-part")
+
+                events = await _stream(
+                    graph,
+                    _make_input(
+                        thread_id="o-part",
+                        resume=[_resolved(ids["needs approval"], {"approved": True})],
+                    ),
+                )
+
+                assert events[-1].outcome == RunFinishedInterruptOutcome(
+                    interrupts=[
+                        AguiInterrupt(
+                            id=ids["draft"],
+                            reason="ApprovalRequested",
+                            metadata={"payload": {"draft": "draft"}},
+                        )
+                    ]
+                )
+
+            def when_the_next_run_answers_the_other():
+                async def it_dispatches_both_answers():
+                    answered: list[tuple[str, bool]] = []
+
+                    @on(ApprovalGiven)
+                    def record(event: ApprovalGiven) -> None:
+                        answered.append((event.draft, event.approved))
+
+                    graph = _graph(
+                        ask_approval, ask_draft, record, checkpointer=MemorySaver()
+                    )
+                    config = _config("o-part-next")
+                    await graph.ainvoke(UserAsked(question="go"), config=config)
+                    ids = await _open_ids_by_draft(graph, "o-part-next")
+                    for draft, approved in (("needs approval", True), ("draft", False)):
+                        events = await _stream(
+                            graph,
+                            _make_input(
+                                thread_id="o-part-next",
+                                resume=[_resolved(ids[draft], {"approved": approved})],
+                            ),
+                        )
+
+                    assert sorted(answered) == [
+                        ("draft", False),
+                        ("needs approval", True),
+                    ]
+                    assert events[-1] == RunFinishedEvent(
+                        thread_id="o-part-next", run_id="run-1"
+                    )

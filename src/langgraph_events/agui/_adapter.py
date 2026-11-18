@@ -29,7 +29,7 @@ from langgraph_events._event import CancelledOnSignal, Event, Interrupted
 from langgraph_events._graph import _snapshot_interrupts
 from langgraph_events._pause import _FRAMEWORK_KEY_PREFIX
 from langgraph_events._run_signals import _RunSignals
-from langgraph_events._stop import stop_is_set
+from langgraph_events._stop import ResumeValue, stop_is_set
 from langgraph_events.stream import (
     CustomEventFrame,
     InterruptFrame,
@@ -53,6 +53,7 @@ from ._mappers import (
     default_mappers,
     interrupt_outcome,
 )
+from ._resume import answers_by_interrupt_id
 from ._state import _DEDICATED_EVENT_KEYS, _default_state_projection
 
 logger = logging.getLogger(__name__)
@@ -438,29 +439,24 @@ class AGUIAdapter:
         ]
 
     @staticmethod
-    def _drop_unknown_resume_entries(
+    def _answers_from_resume_list(
         input_data: RunAgentInput, checkpoint: StateSnapshot
-    ) -> RunAgentInput:
-        """Return *input_data* without the resume entries of no open interrupt.
+    ) -> dict[str, Event] | None:
+        """The answers of an AG-UI 1.0 resume list, or ``None`` for none.
 
-        AG-UI 1.0 lets a run go on without such an entry, with a warning. An
-        open interrupt that no entry then answers stays open.
+        The list replaces the resume factory. An open interrupt that no entry
+        names stays open, so the run ends with the interrupt outcome again.
         """
-        if not input_data.resume:
-            return input_data
-        open_ids = {i.id for i in _snapshot_interrupts(checkpoint)}
-        known = [e for e in input_data.resume if e.interrupt_id in open_ids]
-        dropped = len(input_data.resume) - len(known)
-        if not dropped:
-            return input_data
-        logger.warning(
-            "Dropping %d AG-UI resume entry that names no open interrupt.", dropped
-        )
-        return input_data.model_copy(update={"resume": known})
+        open_interrupts = {i.id: i.value for i in _snapshot_interrupts(checkpoint)}
+        try:
+            answers = answers_by_interrupt_id(input_data.resume or [], open_interrupts)
+        except RunRefusedError as refusal:
+            raise _FactoryRefusalError(refusal) from refusal
+        return answers or None
 
     def _should_gate_with_checkpoint_replay(
         self,
-        resume_event: Event | None,
+        resume_event: ResumeValue | None,
         checkpoint_state: CheckpointState | None,
     ) -> bool:
         """Whether interrupt gate should short-circuit to checkpoint replay."""
@@ -514,7 +510,7 @@ class AGUIAdapter:
     async def _resume_event_stream(
         self,
         input_data: RunAgentInput,
-        resume_event: Event,
+        resume_event: ResumeValue,
         config: RunnableConfig,
         snapshot: StateSnapshot | None,
         context: object,
@@ -608,7 +604,7 @@ class AGUIAdapter:
         self,
         input_data: RunAgentInput,
         checkpoint_state: CheckpointState | None,
-        resume_event: Event | None,
+        resume_event: ResumeValue | None,
         config: RunnableConfig,
         snapshot: StateSnapshot | None,
         context: object,
@@ -791,20 +787,20 @@ class AGUIAdapter:
             if checkpoint_snapshot is not None
             else None
         )
-        if checkpoint_snapshot is not None:
-            input_data = self._drop_unknown_resume_entries(
+        resume_event: ResumeValue | None
+        if input_data.resume and checkpoint_snapshot is not None:
+            resume_event = self._answers_from_resume_list(
                 input_data, checkpoint_snapshot
             )
-        resume_event: Event | None = (
-            None
-            if self._resume_factory is None
-            else await _call_factory(
+        elif self._resume_factory is not None:
+            resume_event = await _call_factory(
                 self._resume_factory,
                 input_data,
                 checkpoint_state,
                 accepts_state=self._resume_accepts_state,
             )
-        )
+        else:
+            resume_event = None
         is_resume = resume_event is not None
         emitted_state_snapshot = False
 

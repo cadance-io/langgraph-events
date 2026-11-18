@@ -3,6 +3,7 @@
 import dataclasses
 import functools
 import inspect
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -25,7 +26,7 @@ from langgraph_events._rewrite import (
 )
 from langgraph_events._run_signals import _RunSignals
 from langgraph_events._services import Services
-from langgraph_events._stop import resume_command
+from langgraph_events._stop import ResumeValue, resume_command
 from langgraph_events._store import EventStore
 from langgraph_events._topology import EventTopology, namespace_handlers
 from langgraph_events._warn import warn_user
@@ -35,7 +36,6 @@ if TYPE_CHECKING:
         AsyncIterator,
         Callable,
         Iterator,
-        Mapping,
         Sequence,
     )
 
@@ -748,7 +748,7 @@ class EventGraph:
         return False
 
     def _apply_unresumable_policy(
-        self, value: Event, kwargs: dict[str, Any]
+        self, value: ResumeValue, kwargs: dict[str, Any]
     ) -> EventLog:
         """Sync ``on_unresumable`` for a resume that would be a no-op.
 
@@ -762,7 +762,7 @@ class EventGraph:
         return self.event_store._settle(config, self._unresumable_event(value))
 
     async def _aapply_unresumable_policy(
-        self, value: Event, kwargs: dict[str, Any]
+        self, value: ResumeValue, kwargs: dict[str, Any]
     ) -> EventLog:
         """Async sibling of :meth:`_apply_unresumable_policy`."""
         config = kwargs["config"]
@@ -772,24 +772,36 @@ class EventGraph:
         return await self.event_store._asettle(config, self._unresumable_event(value))
 
     @staticmethod
-    def _unresumable_event(value: Event) -> Unresumable:
-        return Unresumable(resume_value=type(value).__name__)
+    def _unresumable_event(value: ResumeValue) -> Unresumable:
+        answers = [value] if isinstance(value, Event) else list(value.values())
+        return Unresumable(
+            resume_value=", ".join(type(answer).__name__ for answer in answers)
+        )
 
     @staticmethod
     def _require_resume_event(value: object) -> None:
-        """Raise ``TypeError`` if *value* is not an ``Event``.
+        """Raise ``TypeError`` if *value* is not an ``Event`` or answers by id.
 
         The check runs before the graph runs. LangGraph saves a resume value
         in the checkpoint before the paused handler reads it. A rerun then
         reads the saved value again, so a bad value strands the thread.
         """
-        if not isinstance(value, Event):
-            got = type(value).__name__
-            raise TypeError(f"resume() requires an Event instance, got {got}")
+        if isinstance(value, Event):
+            return
+        if isinstance(value, Mapping) and value:
+            bad = [type(a).__name__ for a in value.values() if not isinstance(a, Event)]
+            if not bad:
+                return
+            raise TypeError(f"resume() requires an Event for each id, got {bad}")
+        got = type(value).__name__
+        raise TypeError(
+            "resume() requires an Event instance, or a non-empty mapping of "
+            f"interrupt ids to Event instances, got {got}"
+        )
 
     def resume(
         self,
-        value: Event,
+        value: ResumeValue,
         *,
         deadline: float | None = None,
         pause_on: PauseSignal | None = None,
@@ -833,7 +845,7 @@ class EventGraph:
 
     async def aresume(
         self,
-        value: Event,
+        value: ResumeValue,
         *,
         deadline: float | None = None,
         pause_on: PauseSignal | None = None,
@@ -1271,7 +1283,7 @@ class EventGraph:
 
     def stream_resume(
         self,
-        value: Event,
+        value: ResumeValue,
         *,
         seeds: list[Event] | None = None,
         include_reducers: bool | list[str] = False,
@@ -1369,7 +1381,7 @@ class EventGraph:
 
     async def astream_resume(
         self,
-        value: Event,
+        value: ResumeValue,
         *,
         seeds: list[Event] | None = None,
         include_reducers: bool | list[str] = False,
