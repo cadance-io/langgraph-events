@@ -588,7 +588,7 @@ The interrupt outcome holds one `Interrupt` for each open interrupt of the threa
 
 | `Interrupt` field | Value |
 |---|---|
-| `id` | The LangGraph id of the interrupt. It stays the same until a resume answers the interrupt. |
+| `id` | The LangGraph id of the interrupt. LangGraph derives it from the paused handler step. So a handler that pauses two times sends the same id for its second question. |
 | `reason` | The class name of the interrupt value, for example `ApprovalRequested` |
 | `metadata` | `{"payload": ...}`, with the value of the `interrupted` custom event. It is absent when the value has no AG-UI mapping. |
 
@@ -596,9 +596,11 @@ The adapter also sends the `interrupted` custom event, as before. A client that 
 
 A `FrontendToolCallRequested` is a frontend tool call, not an interrupt. AG-UI 1.0 ends such a run as a success. The client answers the call with a tool message in the next input, and it finds the open call in the `TOOL_CALL_START` events. So the outcome does not name it. When a real interrupt is also open, the outcome names only the real interrupt.
 
-A 1.0 client sends its answer in `RunAgentInput.resume`. Read it with [`extract_resume_input`](#resume-helpers) in the `resume_factory`. A run on a paused thread whose `resume_factory` returns `None` runs no handler. It ends with the interrupt outcome again, so the client gets another chance to answer. A cancelled run waits for nothing, so a 1.0 client clears its pending interrupts. The next run then sends no answer and gets the interrupt outcome again.
+A resume run answers one interrupt. When two handlers pause in parallel, the outcome names both interrupts. A 1.0 client then sends two entries, and `extract_resume_input` refuses them with `unsupported_resume`. A resume entry with the status `cancelled` is also refused. To move such a thread on, call `abandon()` on the server.
 
-WARNING: a `stop_on=` signal set after the resume turn starts, and before the replayed paused handler commits, cuts that replay. The thread then loses the question and the answer, and the run ends with the cancelled outcome. To keep the question, set the stop before the resume turn starts. See [Stop on a signal](control-flow.md#stop-on-a-signal-cancelledonsignal).
+A 1.0 client sends its answer in `RunAgentInput.resume`. Read it with [`extract_resume_input`](#resume-helpers) in the `resume_factory`. Before the adapter calls the `resume_factory`, it drops each resume entry that names no open interrupt, with a `WARNING`. An open interrupt that no entry answers then stays open. A run on a paused thread whose `resume_factory` returns `None` runs no handler. It ends with the interrupt outcome again, so the client gets another chance to answer. A cancelled run waits for nothing, so a 1.0 client clears its pending interrupts. The next run then sends no answer and gets the interrupt outcome again.
+
+WARNING: a `stop_on=` signal set after the resume turn starts, and before the replayed paused handler commits, cuts that replay. The thread then loses the question and the answer, and the run ends with the cancelled outcome. The adapter keeps the `RunAgentInput.state` that it wrote before the replay. To keep the question, set the stop before the resume turn starts. See [Stop on a signal](control-flow.md#stop-on-a-signal-cancelledonsignal).
 
 ## AG-UI Spec Coverage
 

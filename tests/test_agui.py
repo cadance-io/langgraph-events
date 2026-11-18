@@ -5889,6 +5889,31 @@ def describe_run_finished_outcome():
                     thread_id="o-answer", run_id="run-1"
                 )
 
+        def when_the_resume_list_names_an_interrupt_that_is_not_open():
+            async def it_keeps_the_question_open(caplog):
+                graph = await _paused("o-unknown")
+                interrupt_ids = await _open_interrupt_ids(graph, "o-unknown")
+
+                with caplog.at_level(logging.WARNING, "langgraph_events"):
+                    events = await _stream(
+                        graph,
+                        _make_input(
+                            thread_id="o-unknown",
+                            resume=[_resolved("not-open", {"approved": True})],
+                        ),
+                        resume_factory=_approve_from_resume,
+                    )
+
+                assert events[-1] == RunFinishedEvent(
+                    thread_id="o-unknown",
+                    run_id="run-1",
+                    outcome=_interrupt_outcome(*interrupt_ids),
+                )
+                assert _roled(events, "assistant") == []
+                assert [r.getMessage() for r in caplog.records] == [
+                    "Dropping 1 AG-UI resume entry that names no open interrupt."
+                ]
+
         def when_the_resume_list_cancels_the_interrupt():
             async def it_refuses_the_run_and_keeps_the_question():
                 graph = await _paused("o-cancel")
@@ -5909,17 +5934,18 @@ def describe_run_finished_outcome():
                 assert events[-1].code == "unsupported_resume"
                 assert await _open_interrupt_ids(graph, "o-cancel") == [interrupt_id]
 
-        def when_the_resume_list_answers_two_interrupts():
+        def when_the_resume_list_holds_two_entries():
             async def it_refuses_the_run():
                 graph = await _paused("o-two")
+                (interrupt_id,) = await _open_interrupt_ids(graph, "o-two")
 
                 events = await _stream(
                     graph,
                     _make_input(
                         thread_id="o-two",
                         resume=[
-                            _resolved("first", {"approved": True}),
-                            _resolved("second", {"approved": True}),
+                            _resolved(interrupt_id, {"approved": True}),
+                            _resolved(interrupt_id, {"approved": False}),
                         ],
                     ),
                     resume_factory=_approve_from_resume,

@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `resolved` gives its `payload`. Another list raises `RunRefusedError` with the code
   `unsupported_resume`. Without a `resume` list, it reads `forwarded_props.command.resume`
   as before. See #237.
+- `AGUIAdapter.stream()` drops each `RunAgentInput.resume` entry that names no open
+  interrupt, with a `WARNING`, before it calls the `resume_factory`. The interrupt stays
+  open, and the run ends with the interrupt outcome again. See #237.
 - **BREAKING: `InterruptFrame` has a second field, `interrupt_id`.** It holds the LangGraph id
   of the interrupt. Migration: code that unpacks the frame as `(value,)` must unpack
   `(value, interrupt_id)` or read `frame.value`. See #237.

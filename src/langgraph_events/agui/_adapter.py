@@ -437,6 +437,27 @@ class AGUIAdapter:
             build_messages_snapshot(channels.get("messages") or []),
         ]
 
+    @staticmethod
+    def _drop_unknown_resume_entries(
+        input_data: RunAgentInput, checkpoint: StateSnapshot
+    ) -> RunAgentInput:
+        """Return *input_data* without the resume entries of no open interrupt.
+
+        AG-UI 1.0 lets a run go on without such an entry, with a warning. An
+        open interrupt that no entry then answers stays open.
+        """
+        if not input_data.resume:
+            return input_data
+        open_ids = {i.id for i in _snapshot_interrupts(checkpoint)}
+        known = [e for e in input_data.resume if e.interrupt_id in open_ids]
+        dropped = len(input_data.resume) - len(known)
+        if not dropped:
+            return input_data
+        logger.warning(
+            "Dropping %d AG-UI resume entry that names no open interrupt.", dropped
+        )
+        return input_data.model_copy(update={"resume": known})
+
     def _should_gate_with_checkpoint_replay(
         self,
         resume_event: Event | None,
@@ -770,6 +791,10 @@ class AGUIAdapter:
             if checkpoint_snapshot is not None
             else None
         )
+        if checkpoint_snapshot is not None:
+            input_data = self._drop_unknown_resume_entries(
+                input_data, checkpoint_snapshot
+            )
         resume_event: Event | None = (
             None
             if self._resume_factory is None

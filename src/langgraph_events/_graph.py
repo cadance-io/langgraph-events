@@ -133,8 +133,8 @@ class InterruptFrame(NamedTuple):
 
     ``value`` is the payload of the interrupt. For a handler that returns an
     :class:`Interrupted` event, the value is that event. ``interrupt_id`` is
-    the LangGraph id of the interrupt. It stays the same until a resume
-    answers the interrupt.
+    the LangGraph id of the interrupt. LangGraph derives it from the paused
+    handler step, so a second interrupt of the same step gets the same id.
     """
 
     value: Any
