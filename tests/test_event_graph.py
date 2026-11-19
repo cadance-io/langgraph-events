@@ -1933,9 +1933,9 @@ def describe_EventGraph():
 
             def when_pre_seeded_via_update_state():
 
-                def _texts_reducer(**kw) -> Reducer:
+                def _texts_reducer() -> Reducer:
                     return Reducer[MessageReceived, Any](
-                        "texts", event_type=MessageReceived, fn=lambda e: [e.text], **kw
+                        "texts", event_type=MessageReceived, fn=lambda e: [e.text]
                     )
 
                 def _texts_handler(trigger: type) -> tuple:

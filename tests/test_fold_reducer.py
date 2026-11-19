@@ -364,6 +364,29 @@ def describe_FoldReducer_in_a_graph():
                     graph.invoke(Incremented(by=1), config=config)
                     assert captured[0] == {"n": 101}
 
+            def with_an_empty_list():
+
+                def it_folds_from_the_pre_seeded_list():
+                    from langgraph_events import FoldReducer
+
+                    captured: list[list] = []
+                    log = FoldReducer[list](
+                        name="log", event_type=Logged, default_factory=lambda: ["init"]
+                    )
+
+                    @on(Logged)
+                    def capture(event: Logged, log: list) -> Completed:
+                        captured.append(log)
+                        return Completed(result="ok")
+
+                    graph = EventGraph(
+                        [capture], reducers=[log], checkpointer=MemorySaver()
+                    )
+                    config = {"configurable": {"thread_id": "fold-preseed-empty"}}
+                    graph.pre_seed(config, {"log": []})
+                    graph.invoke(Logged(line="new"), config=config)
+                    assert captured[0] == ["new"]
+
         def when_fold_state_is_itself_a_list():
 
             def it_does_not_mistake_pre_seeded_list_for_events():

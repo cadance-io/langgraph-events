@@ -14,7 +14,7 @@ A `Reducer` channel now always starts empty. A non-empty starting state is the j
 
 | Before | Now | Fix |
 |---|---|---|
-| A `Reducer` could have a non-empty `default`, for example `default=["init"]` | A `Reducer` with a non-empty `default` raises `TypeError` at graph construction that names the reducer. A `pre_seed` list merges into the channel, so it could not replace that default, and a thread stored before the reducer existed never got it | Use `FoldReducer[list[T]](default_factory=...)`, or remove the default and send the starting items as seed events |
+| A `Reducer` could have a non-empty `default`, for example `default=["init"]`. An empty `pre_seed` list could not clear it, and a thread stored before the reducer existed never got it | A `Reducer` with a non-empty `default` raises `TypeError` at graph construction that names the reducer | Use `FoldReducer[list[T]](default_factory=..., fold=lambda state, event: state + fn(event))`, or remove the default and send the starting items as seed events |
 | `message_reducer(default)` took a list of starting messages, for example a `SystemMessage` | The `default` parameter is removed. `message_reducer()` takes only `name=` | Send the system prompt as a seed event, for example `SystemPromptSet.from_str(...)` |
 
 ### Fixed
@@ -31,6 +31,9 @@ A `Reducer` channel now always starts empty. A non-empty starting state is the j
 - A thread that this defect already damaged heals on load. Its checkpoint stores the
   private wrapper as the fold state. The load now folds that wrapper into
   `default_factory()`, and the next write folds into the result.
+- A `FoldReducer` that `pre_seed` sets to `[]` or `None` keeps that state on the first run,
+  and the first run folds into it. Before, the first run replaced it with
+  `default_factory()`.
 
 ## [0.54.2] - 2026-11-19
 

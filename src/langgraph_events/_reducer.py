@@ -462,14 +462,15 @@ class Reducer[E, T](BaseReducer):
     def stored_type(self) -> object:
         """``list[T]``, from ``Reducer[E, T]``. When ``fn`` has a return
         annotation, it must be ``list[T]`` too. Raises ``TypeError`` for a
-        non-empty ``default``: a ``pre_seed`` list merges into the channel
-        through the merge, so it cannot replace a default."""
+        non-empty ``default``: an empty ``pre_seed`` list cannot clear it, and
+        a thread stored before the reducer existed never gets it."""
         if self.default:
             raise TypeError(
-                f"Reducer {self.name!r} has the non-empty default {self.default!r}. "
-                f"A non-empty starting state is the job of a FoldReducer: use "
-                f"FoldReducer[list[T]](default_factory=...). Or remove the default, "
-                f"and send the starting items as seed events."
+                f"{type(self).__name__} {self.name!r} has the non-empty default "
+                f"{self.default!r}. A non-empty starting state is the job of a "
+                f"FoldReducer: use FoldReducer[list[T]](default_factory=..., "
+                f"fold=lambda state, event: state + fn(event)). Or remove the "
+                f"default, and send the starting items as seed events."
             )
         item = self._declared_argument(
             Reducer, f"Reducer[{_type_name(self.event_type)}, T]"
@@ -479,9 +480,7 @@ class Reducer[E, T](BaseReducer):
         return stored
 
     def seed(self, events: list[Event]) -> list[Any]:
-        values = list(self.default)
-        values.extend(self.collect(events))
-        return values
+        return self.collect(events)
 
 
 @dataclass
