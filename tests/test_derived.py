@@ -1006,9 +1006,7 @@ def _seeded_items(e: Seeded) -> list[int]:
     return [e.x]
 
 
-seeded = Reducer[Seeded, int](
-    name="seeded", event_type=Seeded, fn=_seeded_items, default=[0]
-)
+seeded = Reducer[Seeded, int](name="seeded", event_type=Seeded, fn=_seeded_items)
 
 
 @on(Seeded)
@@ -1060,7 +1058,7 @@ def describe_Derived_in_a_per_event_stream():
                 )
             ]
 
-            assert [f.reducers["seeded"] for f in frames[:2]] == [[0, 1], [0, 1, 2]]
+            assert [f.reducers["seeded"] for f in frames[:2]] == [[1], [1, 2]]
 
 
 def describe_Derived_from_a_callable_that_is_not_a_function():

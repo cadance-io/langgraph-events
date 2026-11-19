@@ -617,3 +617,26 @@ def describe_a_services_object_field():
                 TypeError, match=r"services= is a NamedTuple .* use a dataclass"
             ):
                 EventGraph([_shown()], services=_TupleServices(label="x"))
+
+
+def describe_a_list_reducer_default():
+    def when_the_default_is_not_empty():
+        def it_raises_naming_the_reducer_and_the_fix():
+            items = Reducer[Set, int](
+                name="items", event_type=Set, fn=_items_of, default=[0]
+            )
+
+            with pytest.raises(
+                TypeError,
+                match=r"Reducer 'items' has the non-empty default \[0\]\. A "
+                r"non-empty starting state is the job of a FoldReducer",
+            ):
+                EventGraph([_shown()], reducers=[items])
+
+    def when_the_default_is_empty():
+        def it_builds():
+            items = Reducer[Set, int](
+                name="items", event_type=Set, fn=_items_of, default=[]
+            )
+
+            EventGraph([_shown()], reducers=[items])

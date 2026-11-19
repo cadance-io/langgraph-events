@@ -327,8 +327,8 @@ A message without an id gets a UUID id when the reducer projects it, in place on
 ```python
 ...
 messages = message_reducer()
-# or with a default prompt:
-messages = message_reducer([SystemMessage(content="You are helpful.")])
+# A system prompt comes from a seed event:
+log = graph.invoke([SystemPromptSet.from_str("You are helpful."), UserMessageReceived(...)])
 
 @on(UserMessageReceived, ToolsExecuted)
 async def call_llm(event: Event, messages: list[BaseMessage]) -> LLMResponded: ...

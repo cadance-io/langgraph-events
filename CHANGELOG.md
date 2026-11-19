@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+A `Reducer` channel now always starts empty. A non-empty starting state is the job of a
+`FoldReducer`, whose channel starts at `default_factory()` on every thread.
+
+| Before | Now | Fix |
+|---|---|---|
+| A `Reducer` could have a non-empty `default`, for example `default=["init"]` | A `Reducer` with a non-empty `default` raises `TypeError` at graph construction that names the reducer. A `pre_seed` list merges into the channel, so it could not replace that default, and a thread stored before the reducer existed never got it | Use `FoldReducer[list[T]](default_factory=...)`, or remove the default and send the starting items as seed events |
+| `message_reducer(default)` took a list of starting messages, for example a `SystemMessage` | The `default` parameter is removed. `message_reducer()` takes only `name=` | Send the system prompt as a seed event, for example `SystemPromptSet.from_str(...)` |
+
 ### Fixed
 
 - A `FoldReducer` added to a graph now folds the writes of a thread that a checkpoint

@@ -409,7 +409,7 @@ class Reducer[E, T](BaseReducer):
 
         from langgraph_events import message_reducer
 
-        messages = message_reducer([SystemMessage(content="You are helpful")])
+        messages = message_reducer()
 
         graph = EventGraph([call_llm], reducers=[messages])
 
@@ -461,7 +461,16 @@ class Reducer[E, T](BaseReducer):
 
     def stored_type(self) -> object:
         """``list[T]``, from ``Reducer[E, T]``. When ``fn`` has a return
-        annotation, it must be ``list[T]`` too."""
+        annotation, it must be ``list[T]`` too. Raises ``TypeError`` for a
+        non-empty ``default``: a ``pre_seed`` list merges into the channel
+        through the merge, so it cannot replace a default."""
+        if self.default:
+            raise TypeError(
+                f"Reducer {self.name!r} has the non-empty default {self.default!r}. "
+                f"A non-empty starting state is the job of a FoldReducer: use "
+                f"FoldReducer[list[T]](default_factory=...). Or remove the default, "
+                f"and send the starting items as seed events."
+            )
         item = self._declared_argument(
             Reducer, f"Reducer[{_type_name(self.event_type)}, T]"
         )
@@ -879,7 +888,6 @@ class StateRead:
 
 
 def message_reducer(
-    default: list[BaseMessage] | None = None,
     *,
     name: str = "messages",
 ) -> Reducer[MessageEvent, BaseMessage]:
@@ -887,29 +895,24 @@ def message_reducer(
 
     Calls ``as_messages()`` on any ``MessageEvent`` and accumulates
     using ``langgraph.graph.message.add_messages`` for smart deduplication.
+    The channel starts empty. A system prompt comes from a seed event, so
+    the prompt is in the event log.
 
     Args:
-        default: Optional list of initial messages (e.g. a SystemMessage).
         name: State channel name (default ``"messages"``).
 
     Example::
 
-        # Using a SystemPromptSet seed event (preferred — prompt is in the event log):
         messages = message_reducer()
         graph = EventGraph([call_llm], reducers=[messages])
         log = graph.invoke([
             SystemPromptSet.from_str("You are helpful"),
             UserMessageReceived(message=HumanMessage(content="Hi")),
         ])
-
-        # Using an explicit default list:
-        messages = message_reducer([SystemMessage(content="You are helpful")])
     """
     from langgraph.graph.message import add_messages  # noqa: PLC0415
 
     from langgraph_events._event import MessageEvent  # noqa: PLC0415
-
-    resolved_default = default or []
 
     def fn(event: MessageEvent) -> list[BaseMessage]:
         # ``add_messages`` gives a message without an id its id in place, but
@@ -926,5 +929,4 @@ def message_reducer(
         event_type=MessageEvent,
         fn=fn,
         reducer=add_messages,  # type: ignore[arg-type]
-        default=resolved_default,
     )

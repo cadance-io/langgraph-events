@@ -1576,9 +1576,7 @@ def describe_EventGraph():
                         return [f"out:{event.text}"]
                     return []
 
-                r = Reducer[Event, Any](
-                    "history", event_type=Event, fn=project, default=["start"]
-                )
+                r = Reducer[Event, Any]("history", event_type=Event, fn=project)
                 received_history = []
 
                 @on(MessageReceived)
@@ -1592,7 +1590,7 @@ def describe_EventGraph():
 
                 graph = EventGraph([respond, finish], reducers=[r])
                 log = graph.invoke(MessageReceived(text="hello"))
-                assert received_history == ["start", "in:hello"]
+                assert received_history == ["in:hello"]
                 assert log.latest(Completed) == Completed(result="HELLO")
 
             def it_injects_default_plus_projected_seed():
@@ -1700,7 +1698,6 @@ def describe_EventGraph():
                     "upper",
                     event_type=MessageReceived,
                     fn=project_upper,
-                    default=["INIT"],
                 )
                 lower = Reducer[MessageReceived, Any](
                     "lower", event_type=MessageReceived, fn=project_lower
@@ -1715,7 +1712,7 @@ def describe_EventGraph():
                 graph = EventGraph([step], reducers=[upper, lower])
                 log = graph.invoke(MessageReceived(text="Hello"))
                 assert log.latest(Completed) == Completed(
-                    result="upper=['INIT', 'HELLO'],lower=['hello']"
+                    result="upper=['HELLO'],lower=['hello']"
                 )
 
         def describe_parallel_handlers():
@@ -1784,7 +1781,6 @@ def describe_EventGraph():
                     "messages",
                     event_type=Event,
                     fn=to_messages,
-                    default=[("system", "You are helpful")],
                 )
                 message_snapshots: list[list] = []
 
@@ -1804,11 +1800,9 @@ def describe_EventGraph():
                     _FinalAnswerProduced(answer="got:42")
                 )
                 assert message_snapshots[0] == [
-                    ("system", "You are helpful"),
                     ("user", "what is 6*7?"),
                 ]
                 assert message_snapshots[1] == [
-                    ("system", "You are helpful"),
                     ("user", "what is 6*7?"),
                     ("assistant", "need tool"),
                     ("tool", "42"),
@@ -1879,7 +1873,6 @@ def describe_EventGraph():
                         "texts",
                         event_type=MessageReceived,
                         fn=lambda e: [e.text],
-                        default=["init"],
                     )
 
                     @on(MessageReceived)
@@ -1890,17 +1883,17 @@ def describe_EventGraph():
 
                     config = {"configurable": {"thread_id": "reducer-test"}}
                     log = graph.invoke(MessageReceived(text="a"), config=config)
-                    assert log.latest(Completed).result == "init,a"
+                    assert log.latest(Completed).result == "a"
 
                     log = graph.invoke(MessageReceived(text="b"), config=config)
-                    assert log.latest(Completed).result == "init,a,b"
+                    assert log.latest(Completed).result == "a,b"
 
             def when_custom_reducer_function():
 
                 def it_supports_custom_reducer_function():
-                    def always_keep_last_n(left: list, right: list) -> list:
+                    def always_keep_last_one(left: list, right: list) -> list:
                         combined = left + right
-                        return combined[-3:]
+                        return combined[-1:]
 
                     class Continued(IntegrationEvent):
                         text: str = ""
@@ -1916,8 +1909,7 @@ def describe_EventGraph():
                         "recent",
                         event_type=Event,
                         fn=project_all,
-                        reducer=always_keep_last_n,
-                        default=["x", "y", "z"],
+                        reducer=always_keep_last_one,
                     )
                     snapshots: list[list] = []
 
@@ -1936,8 +1928,8 @@ def describe_EventGraph():
 
                     graph = EventGraph([step, finish], reducers=[r])
                     graph.invoke(MessageReceived(text="a"))
-                    assert snapshots[0] == ["y", "z", "a"]
-                    assert snapshots[1] == ["z", "a", "b"]
+                    assert snapshots[0] == ["a"]
+                    assert snapshots[1] == ["b"]
 
             def when_pre_seeded_via_update_state():
 
@@ -2034,21 +2026,6 @@ def describe_EventGraph():
                         graph.invoke(MessageReceived(text="new"), config=config)
                         assert captured[0] == ["existing", "new"]
 
-                def when_reducer_has_non_empty_default():
-
-                    def it_does_not_duplicate_default():
-                        handler, captured = _texts_handler(Started)
-                        graph, config = _pre_seed_graph(
-                            [handler],
-                            [_texts_reducer(default=["init"])],
-                            {"texts": ["custom"]},
-                            "no-dup-default",
-                        )
-                        graph.invoke(Started(data="go"), config=config)
-                        # "init" default should NOT be re-applied on top
-                        # of pre-seeded value.
-                        assert captured[0] == ["custom"]
-
                 def it_advances_cursor_after_pre_seeded_run():
                     handler, captured = _texts_handler(MessageReceived)
                     graph, config = _pre_seed_graph(
@@ -2084,7 +2061,6 @@ def describe_EventGraph():
                         "normal",
                         event_type=Started,
                         fn=lambda e: [e.data],
-                        default=["init"],
                     )
                     graph, config = _pre_seed_graph(
                         [step],
@@ -2094,7 +2070,7 @@ def describe_EventGraph():
                     )
                     graph.invoke(Started(data="go"), config=config)
                     assert captured_seeded[0] == ["external"]
-                    assert captured_normal[0] == ["init", "go"]
+                    assert captured_normal[0] == ["go"]
 
                 @pytest.mark.asyncio
                 async def it_supports_async_apre_seed():
@@ -2424,7 +2400,7 @@ def describe_EventGraph():
 
     def describe_message_reducer():
 
-        def when_defaults_provided():
+        def when_built():
 
             def it_projects_message_events():
                 class UserMsgReceived(IntegrationEvent, MessageEvent):
@@ -2433,7 +2409,7 @@ def describe_EventGraph():
                 class Replied(IntegrationEvent):
                     text: str = ""
 
-                r = message_reducer([SystemMessage(content="You are helpful")])
+                r = message_reducer()
                 msg = HumanMessage(content="hello")
                 result = r.fn(UserMsgReceived(message=msg))
                 assert result == [msg]
@@ -2442,18 +2418,11 @@ def describe_EventGraph():
                 class Replied(IntegrationEvent):
                     text: str = ""
 
-                r = message_reducer([SystemMessage(content="You are helpful")])
+                r = message_reducer()
                 result = r.collect([Replied(text="hi")])
                 assert result == []
 
-            def it_includes_default_messages():
-                r = message_reducer([SystemMessage(content="Be nice")])
-                assert len(r.default) == 1
-                assert r.default[0].content == "Be nice"
-
-        def when_none_given():
-
-            def it_has_empty_default():
+            def it_starts_empty():
                 r = message_reducer()
                 assert r.default == []
 
@@ -2464,45 +2433,6 @@ def describe_EventGraph():
                 assert r.name == "chat_history"
 
         def describe_integration():
-
-            def when_default_system_message():
-
-                def it_accumulates_system_and_user_messages():
-                    class UserMsgReceived(IntegrationEvent, MessageEvent):
-                        message: HumanMessage = None  # type: ignore[assignment]
-
-                    class BotReplied(IntegrationEvent, MessageEvent):
-                        message: AIMessage = None  # type: ignore[assignment]
-
-                    class Finished(IntegrationEvent):
-                        answer: str = ""
-
-                    r = message_reducer([SystemMessage(content="You are a test bot")])
-                    received_messages: list[list[BaseMessage]] = []
-
-                    @on(UserMsgReceived)
-                    def respond(
-                        event: UserMsgReceived,
-                        messages: list[BaseMessage],
-                    ) -> BotReplied:
-                        received_messages.append(list(messages))
-                        return BotReplied(
-                            message=AIMessage(content="I got: " + event.message.content)
-                        )
-
-                    @on(BotReplied)
-                    def finish(event: BotReplied) -> Finished:
-                        return Finished(answer=event.message.content)
-
-                    graph = EventGraph([respond, finish], reducers=[r])
-                    log = graph.invoke(
-                        UserMsgReceived(message=HumanMessage(content="hello"))
-                    )
-                    assert log.latest(Finished) == Finished(answer="I got: hello")
-                    msgs = received_messages[0]
-                    assert len(msgs) == 2
-                    assert msgs[0].content == "You are a test bot"
-                    assert msgs[1].content == "hello"
 
             def when_system_prompt_set_seed():
 
