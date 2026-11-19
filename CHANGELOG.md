@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A type checker accepts a seed factory that takes only the run input.** `AGUIAdapter` types
+  `seed_factory` as `SeedFactory | InputSeedFactory`. The new `InputSeedFactory` protocol takes
+  only `input_data`, so a bound method `def seed(self, input_data, /)` needs no unused
+  `checkpoint_state` parameter. The adapter already called such a factory with the input only.
+
 ## [0.54.1] - 2026-11-18
 
 ### Fixed
