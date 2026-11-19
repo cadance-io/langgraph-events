@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.54.2] - 2026-11-19
+
 ### Fixed
 
 - **A type checker accepts a seed factory that takes only the run input.** `AGUIAdapter` types
@@ -2614,7 +2616,8 @@ stale pending state. Any completed sibling write from a fanned-out superstep sur
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.54.1...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.54.2...HEAD
+[0.54.2]: https://github.com/cadance-io/langgraph-events/compare/v0.54.1...v0.54.2
 [0.54.1]: https://github.com/cadance-io/langgraph-events/compare/v0.54.0...v0.54.1
 [0.54.0]: https://github.com/cadance-io/langgraph-events/compare/v0.53.0...v0.54.0
 [0.53.0]: https://github.com/cadance-io/langgraph-events/compare/v0.52.0...v0.53.0
