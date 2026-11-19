@@ -69,8 +69,8 @@ class SeedFactory(Protocol):
 
     Optionally accepts a second ``checkpoint_state`` dict containing
     reducer snapshots, events, messages, and interrupt info from the
-    checkpoint.  The adapter detects the arity at runtime, so single-arg
-    factories remain fully supported.
+    checkpoint.  The adapter detects the arity at runtime. A factory that
+    reads only the input is an :class:`InputSeedFactory`.
 
     The factory can be ``async``. The adapter awaits an awaitable result.
     Raise :class:`RunRefusedError` to refuse the run before the graph starts.
@@ -80,6 +80,21 @@ class SeedFactory(Protocol):
         self,
         input_data: RunAgentInput,
         checkpoint_state: dict[str, Any] | None = ...,
+    ) -> Event | list[Event] | Awaitable[Event | list[Event]]:
+        """Produce seed event(s) from an AG-UI run request."""
+        ...
+
+
+@runtime_checkable
+class InputSeedFactory(Protocol):
+    """A :class:`SeedFactory` that reads only the run input.
+
+    The adapter passes it no ``checkpoint_state``. The rules of
+    :class:`SeedFactory` apply.
+    """
+
+    def __call__(
+        self, input_data: RunAgentInput, /
     ) -> Event | list[Event] | Awaitable[Event | list[Event]]:
         """Produce seed event(s) from an AG-UI run request."""
         ...

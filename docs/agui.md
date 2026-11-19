@@ -65,6 +65,8 @@ async def run(request: Request):
     return create_starlette_response(adapter.stream(input_data))
 ```
 
+A seed factory that reads only the input is an `InputSeedFactory`. A seed factory that also takes `checkpoint_state` is a `SeedFactory`. `seed_factory=` accepts both.
+
 Pass `error_message="Something went wrong."` to `AGUIAdapter(...)` so that exception details do not reach the client. To send the client a specific error code from a factory, see [Async Factories and Refusals](#async-factories-and-refusals).
 
 ## Built-in Mapper Chain

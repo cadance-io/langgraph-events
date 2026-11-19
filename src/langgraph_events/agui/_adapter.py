@@ -93,7 +93,7 @@ if TYPE_CHECKING:
     from langgraph_events._stop import ResumeValue
     from langgraph_events._types import PauseSignal
 
-    from ._protocols import EventMapper, ResumeFactory, SeedFactory
+    from ._protocols import EventMapper, InputSeedFactory, ResumeFactory, SeedFactory
 
 
 _SERVER_ONLY_KEYS = frozenset({"thread_id", "checkpoint_id", "checkpoint_ns"})
@@ -146,7 +146,7 @@ class AGUIAdapter:
         self,
         graph: EventGraph,
         *,
-        seed_factory: SeedFactory,
+        seed_factory: SeedFactory | InputSeedFactory,
         resume_factory: ResumeFactory | None = None,
         mappers: list[EventMapper] | None = None,
         include_reducers: bool | list[str] = True,

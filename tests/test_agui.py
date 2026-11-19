@@ -3023,6 +3023,24 @@ def describe_seed_factory_state():
             assert events[0].type == EventType.RUN_STARTED
             assert events[-1].type == EventType.RUN_FINISHED
 
+        async def it_passes_only_the_input_to_a_bound_method():
+            class Seeds:
+                def __init__(self) -> None:
+                    self.received: list[RunAgentInput] = []
+
+                def seed(self, input_data: RunAgentInput, /) -> UserAsked:
+                    self.received.append(input_data)
+                    return UserAsked(question="bound")
+
+            seeds = Seeds()
+            input_data = _make_input()
+            graph = _graph(reply, checkpointer=MemorySaver())
+
+            events = await _stream(graph, input_data, seed_factory=seeds.seed)
+
+            assert seeds.received == [input_data]
+            assert events[-1].type == EventType.RUN_FINISHED
+
     def when_no_checkpointer():
         async def it_seed_factory_receives_none():
             received_states: list[Any] = []

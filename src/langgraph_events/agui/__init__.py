@@ -29,6 +29,7 @@ from langgraph_events.agui._protocols import (
     AGUICustomEvent,
     AGUISerializable,
     EventMapper,
+    InputSeedFactory,
     ResumeFactory,
     SeedFactory,
 )
@@ -85,6 +86,7 @@ __all__ = [
     "FrontendStateMutated",
     "FrontendToolCallRequested",
     "FrontendToolCallRequestedMapper",
+    "InputSeedFactory",
     "InterruptedMapper",
     "InterruptedWithPayload",
     "MapperContext",
