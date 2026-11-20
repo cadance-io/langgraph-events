@@ -292,6 +292,29 @@ def describe_FoldReducer_in_a_graph():
                 # None is a real stored state value end-to-end, not "unset".
                 assert captured == [None]
 
+        def when_a_fresh_thread_runs_no_folding_event():
+
+            def it_stores_the_initial_state():
+                from langgraph_events import FoldReducer
+
+                saver = MemorySaver()
+                cfg = {"configurable": {"thread_id": "fold-fresh-no-event"}}
+
+                @on(Started)
+                def finish(event: Started) -> Completed:
+                    return Completed(result="ok")
+
+                counter = FoldReducer[dict[str, int]](
+                    name="counter",
+                    event_type=Incremented,
+                    default_factory=lambda: {"n": 0},
+                )
+                graph = EventGraph([finish], reducers=[counter], checkpointer=saver)
+                graph.invoke(Started(data="go"), config=cfg)
+
+                stored = saver.get_tuple(cfg).checkpoint["channel_values"]
+                assert stored["counter"] == {"n": 0}
+
     def describe_streaming_path():
 
         def when_streamed():
@@ -340,6 +363,29 @@ def describe_FoldReducer_in_a_graph():
                     graph.pre_seed(config, {"counter": {"n": 100}})
                     graph.invoke(Incremented(by=1), config=config)
                     assert captured[0] == {"n": 101}
+
+            def with_an_empty_list():
+
+                def it_folds_from_the_pre_seeded_list():
+                    from langgraph_events import FoldReducer
+
+                    captured: list[list] = []
+                    log = FoldReducer[list](
+                        name="log", event_type=Logged, default_factory=lambda: ["init"]
+                    )
+
+                    @on(Logged)
+                    def capture(event: Logged, log: list) -> Completed:
+                        captured.append(log)
+                        return Completed(result="ok")
+
+                    graph = EventGraph(
+                        [capture], reducers=[log], checkpointer=MemorySaver()
+                    )
+                    config = {"configurable": {"thread_id": "fold-preseed-empty"}}
+                    graph.pre_seed(config, {"log": []})
+                    graph.invoke(Logged(line="new"), config=config)
+                    assert captured[0] == ["new"]
 
         def when_fold_state_is_itself_a_list():
 

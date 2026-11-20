@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+A `Reducer` channel now always starts empty. A non-empty starting state is the job of a
+`FoldReducer`, whose channel starts at `default_factory()` on every thread.
+
+| Before | Now | Fix |
+|---|---|---|
+| A `Reducer` could have a non-empty `default`, for example `default=["init"]`. An empty `pre_seed` list could not clear it, and a thread stored before the reducer existed never got it | A `Reducer` with a non-empty `default` raises `TypeError` at graph construction that names the reducer | Use `FoldReducer[list[T]](default_factory=..., fold=lambda state, event: state + fn(event))`, or remove the default and send the starting items as seed events |
+| `message_reducer(default)` took a list of starting messages, for example a `SystemMessage` | The `default` parameter is removed. `message_reducer()` takes only `name=` | Send the system prompt as a seed event, for example `SystemPromptSet.from_str(...)` |
+
+### Fixed
+
+- A `FoldReducer` added to a graph now folds the writes of a thread that a checkpoint
+  stored before the reducer existed. The checkpoint holds no value for the new channel,
+  and only the first run of a thread wrote the initial fold state. So the first write
+  stored the private wrapper of the fold events as the state, each reader got that
+  wrapper, and the next write raised `TypeError` in the fold. The channel now starts at
+  `default_factory()`, so each write folds into it, on every path that writes: a run, a
+  handler, a resume. A `Derived` that reads the channel now gets the folded state too. A
+  `ScalarReducer` did not have this defect. Until the first write on such a thread, each
+  load calls `default_factory()`, so it must return an equal new value on each call.
+- A thread that this defect already damaged heals on load. Its checkpoint stores the
+  private wrapper as the fold state. The load now folds that wrapper into
+  `default_factory()`, and the next write folds into the result.
+- A `FoldReducer` that `pre_seed` sets to `[]` or `None` keeps that state on the first run,
+  and the first run folds into it. Before, the first run replaced it with
+  `default_factory()`.
+
 ## [0.54.2] - 2026-11-19
 
 ### Fixed

@@ -1576,9 +1576,7 @@ def describe_EventGraph():
                         return [f"out:{event.text}"]
                     return []
 
-                r = Reducer[Event, Any](
-                    "history", event_type=Event, fn=project, default=["start"]
-                )
+                r = Reducer[Event, Any]("history", event_type=Event, fn=project)
                 received_history = []
 
                 @on(MessageReceived)
@@ -1592,7 +1590,7 @@ def describe_EventGraph():
 
                 graph = EventGraph([respond, finish], reducers=[r])
                 log = graph.invoke(MessageReceived(text="hello"))
-                assert received_history == ["start", "in:hello"]
+                assert received_history == ["in:hello"]
                 assert log.latest(Completed) == Completed(result="HELLO")
 
             def it_injects_default_plus_projected_seed():
@@ -1700,7 +1698,6 @@ def describe_EventGraph():
                     "upper",
                     event_type=MessageReceived,
                     fn=project_upper,
-                    default=["INIT"],
                 )
                 lower = Reducer[MessageReceived, Any](
                     "lower", event_type=MessageReceived, fn=project_lower
@@ -1715,7 +1712,7 @@ def describe_EventGraph():
                 graph = EventGraph([step], reducers=[upper, lower])
                 log = graph.invoke(MessageReceived(text="Hello"))
                 assert log.latest(Completed) == Completed(
-                    result="upper=['INIT', 'HELLO'],lower=['hello']"
+                    result="upper=['HELLO'],lower=['hello']"
                 )
 
         def describe_parallel_handlers():
@@ -1784,7 +1781,6 @@ def describe_EventGraph():
                     "messages",
                     event_type=Event,
                     fn=to_messages,
-                    default=[("system", "You are helpful")],
                 )
                 message_snapshots: list[list] = []
 
@@ -1804,11 +1800,9 @@ def describe_EventGraph():
                     _FinalAnswerProduced(answer="got:42")
                 )
                 assert message_snapshots[0] == [
-                    ("system", "You are helpful"),
                     ("user", "what is 6*7?"),
                 ]
                 assert message_snapshots[1] == [
-                    ("system", "You are helpful"),
                     ("user", "what is 6*7?"),
                     ("assistant", "need tool"),
                     ("tool", "42"),
@@ -1879,7 +1873,6 @@ def describe_EventGraph():
                         "texts",
                         event_type=MessageReceived,
                         fn=lambda e: [e.text],
-                        default=["init"],
                     )
 
                     @on(MessageReceived)
@@ -1890,17 +1883,17 @@ def describe_EventGraph():
 
                     config = {"configurable": {"thread_id": "reducer-test"}}
                     log = graph.invoke(MessageReceived(text="a"), config=config)
-                    assert log.latest(Completed).result == "init,a"
+                    assert log.latest(Completed).result == "a"
 
                     log = graph.invoke(MessageReceived(text="b"), config=config)
-                    assert log.latest(Completed).result == "init,a,b"
+                    assert log.latest(Completed).result == "a,b"
 
             def when_custom_reducer_function():
 
                 def it_supports_custom_reducer_function():
-                    def always_keep_last_n(left: list, right: list) -> list:
+                    def always_keep_last_one(left: list, right: list) -> list:
                         combined = left + right
-                        return combined[-3:]
+                        return combined[-1:]
 
                     class Continued(IntegrationEvent):
                         text: str = ""
@@ -1916,8 +1909,7 @@ def describe_EventGraph():
                         "recent",
                         event_type=Event,
                         fn=project_all,
-                        reducer=always_keep_last_n,
-                        default=["x", "y", "z"],
+                        reducer=always_keep_last_one,
                     )
                     snapshots: list[list] = []
 
@@ -1936,14 +1928,14 @@ def describe_EventGraph():
 
                     graph = EventGraph([step, finish], reducers=[r])
                     graph.invoke(MessageReceived(text="a"))
-                    assert snapshots[0] == ["y", "z", "a"]
-                    assert snapshots[1] == ["z", "a", "b"]
+                    assert snapshots[0] == ["a"]
+                    assert snapshots[1] == ["b"]
 
             def when_pre_seeded_via_update_state():
 
-                def _texts_reducer(**kw) -> Reducer:
+                def _texts_reducer() -> Reducer:
                     return Reducer[MessageReceived, Any](
-                        "texts", event_type=MessageReceived, fn=lambda e: [e.text], **kw
+                        "texts", event_type=MessageReceived, fn=lambda e: [e.text]
                     )
 
                 def _texts_handler(trigger: type) -> tuple:
@@ -2034,21 +2026,6 @@ def describe_EventGraph():
                         graph.invoke(MessageReceived(text="new"), config=config)
                         assert captured[0] == ["existing", "new"]
 
-                def when_reducer_has_non_empty_default():
-
-                    def it_does_not_duplicate_default():
-                        handler, captured = _texts_handler(Started)
-                        graph, config = _pre_seed_graph(
-                            [handler],
-                            [_texts_reducer(default=["init"])],
-                            {"texts": ["custom"]},
-                            "no-dup-default",
-                        )
-                        graph.invoke(Started(data="go"), config=config)
-                        # "init" default should NOT be re-applied on top
-                        # of pre-seeded value.
-                        assert captured[0] == ["custom"]
-
                 def it_advances_cursor_after_pre_seeded_run():
                     handler, captured = _texts_handler(MessageReceived)
                     graph, config = _pre_seed_graph(
@@ -2084,7 +2061,6 @@ def describe_EventGraph():
                         "normal",
                         event_type=Started,
                         fn=lambda e: [e.data],
-                        default=["init"],
                     )
                     graph, config = _pre_seed_graph(
                         [step],
@@ -2094,7 +2070,7 @@ def describe_EventGraph():
                     )
                     graph.invoke(Started(data="go"), config=config)
                     assert captured_seeded[0] == ["external"]
-                    assert captured_normal[0] == ["init", "go"]
+                    assert captured_normal[0] == ["go"]
 
                 @pytest.mark.asyncio
                 async def it_supports_async_apre_seed():
@@ -2424,7 +2400,7 @@ def describe_EventGraph():
 
     def describe_message_reducer():
 
-        def when_defaults_provided():
+        def when_built():
 
             def it_projects_message_events():
                 class UserMsgReceived(IntegrationEvent, MessageEvent):
@@ -2433,7 +2409,7 @@ def describe_EventGraph():
                 class Replied(IntegrationEvent):
                     text: str = ""
 
-                r = message_reducer([SystemMessage(content="You are helpful")])
+                r = message_reducer()
                 msg = HumanMessage(content="hello")
                 result = r.fn(UserMsgReceived(message=msg))
                 assert result == [msg]
@@ -2442,18 +2418,11 @@ def describe_EventGraph():
                 class Replied(IntegrationEvent):
                     text: str = ""
 
-                r = message_reducer([SystemMessage(content="You are helpful")])
+                r = message_reducer()
                 result = r.collect([Replied(text="hi")])
                 assert result == []
 
-            def it_includes_default_messages():
-                r = message_reducer([SystemMessage(content="Be nice")])
-                assert len(r.default) == 1
-                assert r.default[0].content == "Be nice"
-
-        def when_none_given():
-
-            def it_has_empty_default():
+            def it_starts_empty():
                 r = message_reducer()
                 assert r.default == []
 
@@ -2464,45 +2433,6 @@ def describe_EventGraph():
                 assert r.name == "chat_history"
 
         def describe_integration():
-
-            def when_default_system_message():
-
-                def it_accumulates_system_and_user_messages():
-                    class UserMsgReceived(IntegrationEvent, MessageEvent):
-                        message: HumanMessage = None  # type: ignore[assignment]
-
-                    class BotReplied(IntegrationEvent, MessageEvent):
-                        message: AIMessage = None  # type: ignore[assignment]
-
-                    class Finished(IntegrationEvent):
-                        answer: str = ""
-
-                    r = message_reducer([SystemMessage(content="You are a test bot")])
-                    received_messages: list[list[BaseMessage]] = []
-
-                    @on(UserMsgReceived)
-                    def respond(
-                        event: UserMsgReceived,
-                        messages: list[BaseMessage],
-                    ) -> BotReplied:
-                        received_messages.append(list(messages))
-                        return BotReplied(
-                            message=AIMessage(content="I got: " + event.message.content)
-                        )
-
-                    @on(BotReplied)
-                    def finish(event: BotReplied) -> Finished:
-                        return Finished(answer=event.message.content)
-
-                    graph = EventGraph([respond, finish], reducers=[r])
-                    log = graph.invoke(
-                        UserMsgReceived(message=HumanMessage(content="hello"))
-                    )
-                    assert log.latest(Finished) == Finished(answer="I got: hello")
-                    msgs = received_messages[0]
-                    assert len(msgs) == 2
-                    assert msgs[0].content == "You are a test bot"
-                    assert msgs[1].content == "hello"
 
             def when_system_prompt_set_seed():
 
@@ -6651,3 +6581,174 @@ def describe_aresume_by_interrupt_id():
             )
 
             assert dismissed == ["second"]
+
+
+# Fixtures for a reducer added to a graph after a thread was stored. The
+# stored checkpoint holds no value for the new channel.
+class _Bumped(IntegrationEvent):
+    by: int = 1
+
+    def fold(self, state: dict[str, int]) -> dict[str, int]:
+        return {"n": state["n"] + self.by}
+
+
+class _Bump(IntegrationEvent):
+    by: int = 1
+
+
+@on(Started)
+def _before_the_reducer(event: Started) -> None:
+    return None
+
+
+@on(_Bump)
+def _bump(event: _Bump) -> _Bumped:
+    return _Bumped(by=event.by)
+
+
+@on(_Go)
+def _bump_on_go(event: _Go) -> _Bumped:
+    return _Bumped(by=2)
+
+
+def _tally() -> Any:
+    from langgraph_events import FoldReducer
+
+    return FoldReducer[dict[str, int]](
+        name="tally", event_type=_Bumped, default_factory=lambda: {"n": 0}
+    )
+
+
+def _stored_thread(saver: MemorySaver, thread_id: str) -> dict[str, Any]:
+    """A thread that a graph with no reducer stored."""
+    cfg: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+    EventGraph([_before_the_reducer], checkpointer=saver).invoke(
+        Started(data="x"), config=cfg
+    )
+    return cfg
+
+
+def describe_a_reducer_added_after_a_thread_was_stored():
+
+    def describe_FoldReducer():
+
+        def when_a_handler_writes_twice():
+
+            def it_folds_each_write_from_the_default():
+                saver = MemorySaver()
+                cfg = _stored_thread(saver, "fold-added-handler")
+                seen: list[dict[str, int]] = []
+
+                @on(_Bumped)
+                def read(event: _Bumped, tally: dict[str, int]) -> None:
+                    seen.append(tally)
+
+                graph = EventGraph(
+                    [_bump, read], reducers=[_tally()], checkpointer=saver
+                )
+                graph.invoke(_Bump(by=2), config=cfg)
+                graph.invoke(_Bump(by=3), config=cfg)
+
+                assert seen == [{"n": 2}, {"n": 5}]
+                assert graph.compiled.get_state(cfg).values["tally"] == {"n": 5}
+
+        def when_the_run_input_writes_twice():
+
+            def it_folds_each_write_from_the_default():
+                saver = MemorySaver()
+                cfg = _stored_thread(saver, "fold-added-seed")
+                graph = EventGraph(
+                    [_before_the_reducer], reducers=[_tally()], checkpointer=saver
+                )
+                graph.invoke(_Bumped(by=2), config=cfg)
+                graph.invoke(_Bumped(by=3), config=cfg)
+
+                assert graph.compiled.get_state(cfg).values["tally"] == {"n": 5}
+
+        def when_a_paused_thread_resumes():
+
+            def it_folds_the_resumed_write_from_the_default():
+                saver = MemorySaver()
+                cfg: dict[str, Any] = {
+                    "configurable": {"thread_id": "fold-added-paused"}
+                }
+                EventGraph([_waiter, _go_noop], checkpointer=saver).invoke(
+                    Started(data="x"), config=cfg
+                )
+                graph = EventGraph(
+                    [_waiter, _bump_on_go], reducers=[_tally()], checkpointer=saver
+                )
+                graph.resume(_Go(), config=cfg)
+                graph.invoke(_Go(), config=cfg)
+
+                assert graph.compiled.get_state(cfg).values["tally"] == {"n": 4}
+
+        def when_a_Derived_reads_the_channel():
+
+            def it_reads_the_folded_state():
+                from langgraph_events import Derived
+
+                saver = MemorySaver()
+                cfg = _stored_thread(saver, "fold-added-derived")
+                seen: list[int] = []
+
+                def count_of(tally: dict[str, int]) -> int:
+                    return tally["n"]
+
+                @on(_Bumped)
+                def read(event: _Bumped, count: int) -> None:
+                    seen.append(count)
+
+                graph = EventGraph(
+                    [_bump, read],
+                    reducers=[_tally(), Derived(name="count", fn=count_of)],
+                    checkpointer=saver,
+                )
+                graph.invoke(_Bump(by=2), config=cfg)
+                graph.invoke(_Bump(by=3), config=cfg)
+
+                assert seen == [2, 5]
+
+        def when_the_stored_state_is_the_wrapper_of_an_older_release():
+            # 0.51.1 or older stored the private wrapper of the fold events
+            # as the state on such a thread. A stored wrapper is always that
+            # defect.
+
+            def it_folds_the_wrapper_from_the_default_on_load():
+                from typing import Annotated
+
+                from langgraph_events import FoldReducer
+
+                class _OlderFold(FoldReducer[dict[str, int]]):
+                    def state_annotation(self) -> object:
+                        return Annotated[Any, self._merge]
+
+                saver = MemorySaver()
+                cfg = _stored_thread(saver, "fold-added-damaged")
+                older = _OlderFold(
+                    name="tally", event_type=_Bumped, default_factory=lambda: {"n": 0}
+                )
+                EventGraph([_bump], reducers=[older], checkpointer=saver).invoke(
+                    _Bump(by=2), config=cfg
+                )
+                graph = EventGraph([_bump], reducers=[_tally()], checkpointer=saver)
+
+                assert graph.compiled.get_state(cfg).values["tally"] == {"n": 2}
+                graph.invoke(_Bump(by=3), config=cfg)
+                assert graph.compiled.get_state(cfg).values["tally"] == {"n": 5}
+
+    def describe_ScalarReducer():
+
+        def when_a_handler_writes_twice():
+
+            def it_keeps_the_last_write():
+                saver = MemorySaver()
+                cfg = _stored_thread(saver, "scalar-added")
+                last = ScalarReducer[_Bumped, int](
+                    name="last", event_type=_Bumped, fn=lambda e: e.by, default=0
+                )
+                graph = EventGraph([_bump], reducers=[last], checkpointer=saver)
+                graph.invoke(_Bump(by=2), config=cfg)
+                graph.invoke(_Bump(by=3), config=cfg)
+
+                assert graph.compiled.get_state(cfg).values["last"] == 3

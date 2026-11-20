@@ -20,6 +20,7 @@ from typing import (
 # Read at run time: ``message_reducer`` declares ``list[BaseMessage]``, and
 # graph construction resolves the return annotation of its ``fn``.
 from langchain_core.messages import BaseMessage
+from langgraph.channels.binop import BinaryOperatorAggregate
 
 from langgraph_events._event_log import EventLog
 from langgraph_events._hints import (
@@ -408,7 +409,7 @@ class Reducer[E, T](BaseReducer):
 
         from langgraph_events import message_reducer
 
-        messages = message_reducer([SystemMessage(content="You are helpful")])
+        messages = message_reducer()
 
         graph = EventGraph([call_llm], reducers=[messages])
 
@@ -460,7 +461,17 @@ class Reducer[E, T](BaseReducer):
 
     def stored_type(self) -> object:
         """``list[T]``, from ``Reducer[E, T]``. When ``fn`` has a return
-        annotation, it must be ``list[T]`` too."""
+        annotation, it must be ``list[T]`` too. Raises ``TypeError`` for a
+        non-empty ``default``: an empty ``pre_seed`` list cannot clear it, and
+        a thread stored before the reducer existed never gets it."""
+        if self.default:
+            raise TypeError(
+                f"{type(self).__name__} {self.name!r} has the non-empty default "
+                f"{self.default!r}. A non-empty starting state is the job of a "
+                f"FoldReducer: use FoldReducer[list[T]](default_factory=..., "
+                f"fold=lambda state, event: state + fn(event)). Or remove the "
+                f"default, and send the starting items as seed events."
+            )
         item = self._declared_argument(
             Reducer, f"Reducer[{_type_name(self.event_type)}, T]"
         )
@@ -469,9 +480,7 @@ class Reducer[E, T](BaseReducer):
         return stored
 
     def seed(self, events: list[Event]) -> list[Any]:
-        values = list(self.default)
-        values.extend(self.collect(events))
-        return values
+        return self.collect(events)
 
 
 @dataclass
@@ -606,6 +615,49 @@ class _Contributions:
     events: list[Event]
 
 
+class _FoldChannel(BinaryOperatorAggregate[Any]):
+    """The channel of a ``FoldReducer``. Before the first write, its value is
+    the initial fold state, ``default_factory()``.
+
+    LangGraph's own channel for an ``Any`` value starts unset, and stores the
+    first write as is, without the merge. A thread stored before the reducer
+    joined the graph holds no value for the channel, so its first write must
+    fold into the initial state too, on every path that writes. Until that
+    write, each load calls ``default_factory()`` again, so it must return
+    the same value on each call.
+    """
+
+    __slots__ = ("initial",)
+    initial: Callable[[], Any]
+
+    @classmethod
+    def of(
+        cls, initial: Callable[[], Any], merge: Callable[[Any, Any], Any]
+    ) -> _FoldChannel:
+        # ``Any()`` raises, so the base channel starts unset. LangGraph builds
+        # each running channel through ``from_checkpoint``, which sets it.
+        channel = cls(cast("type[Any]", Any), merge)
+        channel.initial = initial
+        return channel
+
+    def copy(self) -> typing.Self:
+        channel = super().copy()
+        channel.initial = self.initial
+        return channel
+
+    def from_checkpoint(self, checkpoint: Any) -> typing.Self:  # noqa: ANN401 - LangGraph's channel signature
+        channel = super().from_checkpoint(checkpoint)
+        channel.initial = self.initial
+        if not channel.is_available():
+            channel.value = self.initial()
+        elif isinstance(channel.value, _Contributions):
+            # 0.51.1 or older stored the wrapper as the state on a thread
+            # stored before the reducer existed. The wrapper is private, so a
+            # stored one is always that defect: fold it into the initial state.
+            channel.value = channel.operator(self.initial(), channel.value)
+        return channel
+
+
 @dataclass
 class FoldReducer[S](BaseReducer):
     """Folds each matching event into a single accumulating state object.
@@ -659,11 +711,9 @@ class FoldReducer[S](BaseReducer):
         return self._merge
 
     def state_annotation(self) -> object:
-        # Stays ``Any`` on purpose: LangGraph's BinaryOperatorAggregate calls
-        # ``Any()`` (which raises) so the channel starts MISSING and the first
-        # write is set directly, matching ScalarReducer. A concrete ``S`` whose
-        # ``S()`` succeeds (e.g. ``dict``) would break that first-write path.
-        return Annotated[Any, self._merge]
+        # The channel starts at ``default_factory()``, so a write folds into
+        # it also on a thread stored before this reducer joined the graph.
+        return Annotated[Any, _FoldChannel.of(self.default_factory, self._merge)]
 
     @property
     def empty(self) -> S:
@@ -837,7 +887,6 @@ class StateRead:
 
 
 def message_reducer(
-    default: list[BaseMessage] | None = None,
     *,
     name: str = "messages",
 ) -> Reducer[MessageEvent, BaseMessage]:
@@ -845,29 +894,24 @@ def message_reducer(
 
     Calls ``as_messages()`` on any ``MessageEvent`` and accumulates
     using ``langgraph.graph.message.add_messages`` for smart deduplication.
+    The channel starts empty. A system prompt comes from a seed event, so
+    the prompt is in the event log.
 
     Args:
-        default: Optional list of initial messages (e.g. a SystemMessage).
         name: State channel name (default ``"messages"``).
 
     Example::
 
-        # Using a SystemPromptSet seed event (preferred — prompt is in the event log):
         messages = message_reducer()
         graph = EventGraph([call_llm], reducers=[messages])
         log = graph.invoke([
             SystemPromptSet.from_str("You are helpful"),
             UserMessageReceived(message=HumanMessage(content="Hi")),
         ])
-
-        # Using an explicit default list:
-        messages = message_reducer([SystemMessage(content="You are helpful")])
     """
     from langgraph.graph.message import add_messages  # noqa: PLC0415
 
     from langgraph_events._event import MessageEvent  # noqa: PLC0415
-
-    resolved_default = default or []
 
     def fn(event: MessageEvent) -> list[BaseMessage]:
         # ``add_messages`` gives a message without an id its id in place, but
@@ -884,5 +928,4 @@ def message_reducer(
         event_type=MessageEvent,
         fn=fn,
         reducer=add_messages,  # type: ignore[arg-type]
-        default=resolved_default,
     )
