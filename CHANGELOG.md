@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `FoldReducer` takes an optional second type argument, the event type `E`, as
+  `FoldReducer[S, E]`. An explicit `fold=` can then annotate its event as the real event
+  union, for example `def fold(done: list[UUID], event: A | B) -> list[UUID]`, and mypy
+  accepts it. Before, `fold` had to take `Foldable` or `Any`. `E` defaults to `Foldable`,
+  so `FoldReducer[S]` works as before. `S` stays the stored type that a handler annotates.
+
 ## [0.55.0] - 2026-11-21
 
 ### Breaking

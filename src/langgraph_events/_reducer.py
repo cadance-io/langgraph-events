@@ -195,22 +195,25 @@ class BaseReducer(ABC):
         bound = dict(zip(params, self._declared, strict=False))
         return _base_arguments(type(self), generic, bound)
 
-    def _declared_argument(self, generic: type, example: str) -> object:
-        """The last type argument that this reducer declares for *generic*.
+    def _declared_argument(self, generic: type, stored: str, example: str) -> object:
+        """The type argument that this reducer declares for the type
+        parameter of *generic* named *stored*, the parameter that holds the
+        stored type.
 
         Raises ``TypeError`` that names the reducer and the fix when the
         argument is missing, or names no class yet. *example* is the
         subscription that the fix shows.
         """
         arguments = self._type_arguments(generic)
+        position = [p.__name__ for p in generic.__type_params__].index(stored)
         label = f"{type(self).__name__} {self.name!r}"
-        if not arguments:
+        if len(arguments) <= position:
             raise TypeError(
                 f"{label} declares no stored type. Subscript it: {example}(...). "
                 f"The framework checks each reader against the declared type, "
                 f"and never guesses it."
             )
-        declared = arguments[-1]
+        declared = arguments[position]
         try:
             _normal(declared)
         except UnsettledTypeError as exc:
@@ -462,7 +465,7 @@ class Reducer[E, T](BaseReducer):
         """``list[T]``, from ``Reducer[E, T]``. When ``fn`` has a return
         annotation, it must be ``list[T]`` too."""
         item = self._declared_argument(
-            Reducer, f"Reducer[{_type_name(self.event_type)}, T]"
+            Reducer, "T", f"Reducer[{_type_name(self.event_type)}, T]"
         )
         stored = list[item]  # type: ignore[valid-type]
         self._require_fn_returns(self.fn, stored, skips=False)
@@ -550,6 +553,7 @@ class ScalarReducer[E, T](BaseReducer):
         be ``T``, with or without ``SkipType``."""
         declared = self._declared_argument(
             ScalarReducer,
+            "T",
             f"ScalarReducer[{_type_name(self.event_type)}, {self._fn_example()}]",
         )
         self._require_fn_returns(self.fn, declared, skips=True)
@@ -648,7 +652,7 @@ class _FoldChannel(BinaryOperatorAggregate[Any]):
 
 
 @dataclass
-class FoldReducer[S](BaseReducer):
+class FoldReducer[S, E = Foldable](BaseReducer):
     """Folds each matching event into a single accumulating state object.
 
     Where :class:`Reducer` appends and :class:`ScalarReducer` takes the last
@@ -657,7 +661,10 @@ class FoldReducer[S](BaseReducer):
     cursors, or any channel whose update depends on what came before.
 
     The type parameter ``S`` is the accumulating state type that the reducer
-    folds events into.
+    folds events into. The optional type parameter ``E`` is the event type
+    that ``fold`` reads, and defaults to :class:`Foldable`. Give it when an
+    explicit ``fold=`` takes the real event union, for example
+    ``FoldReducer[list[UUID], A | B]``. ``S`` stays the stored type.
 
     Each event owns its transition through ``fold(self, state)`` (mirroring
     :meth:`MessageEvent.as_messages`), so callers usually supply only the
@@ -685,7 +692,7 @@ class FoldReducer[S](BaseReducer):
     name: str = ""
     event_type: EventTypeSpec = field(kw_only=True)
     default_factory: Callable[[], S] = field(kw_only=True)
-    fold: Callable[[S, Foldable], S | _ResetType | SkipType] = field(
+    fold: Callable[[S, E], S | _ResetType | SkipType] = field(
         kw_only=True, default=lambda state, event: event.fold(state)
     )
     namespace: type[Namespace] | None = field(kw_only=True, default=None)
@@ -725,8 +732,8 @@ class FoldReducer[S](BaseReducer):
         return Any
 
     def stored_type(self) -> object:
-        """``S``, from ``FoldReducer[S]``."""
-        return self._declared_argument(FoldReducer, "FoldReducer[S]")
+        """``S``, from ``FoldReducer[S]`` or ``FoldReducer[S, E]``."""
+        return self._declared_argument(FoldReducer, "S", "FoldReducer[S]")
 
     def seed(self, events: list[Event]) -> S:
         return self._fold_events(self.default_factory(), self.collect(events).events)
@@ -741,9 +748,9 @@ class FoldReducer[S](BaseReducer):
     def _fold_events(self, state: S, events: list[Event]) -> S:
         for event in events:
             # ``collect``'s event_type filter guarantees every event here is
-            # Foldable at runtime; the cast bridges the Event-typed internal
-            # stream to ``fold``'s ``Foldable`` parameter.
-            result = self.fold(state, cast("Foldable", event))
+            # an ``E`` at runtime; the cast bridges the Event-typed internal
+            # stream to ``fold``'s ``E`` parameter.
+            result = self.fold(state, cast("E", event))
             # isinstance (not ``is``) so mypy narrows the result to ``S`` in
             # the else branch — SKIP/RESET are the sole instances of their
             # private types, so this is identity-equivalent in practice.

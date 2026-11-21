@@ -11,6 +11,7 @@ A passing mypy run proves two things at once:
 """
 
 from typing import assert_type
+from uuid import UUID, uuid4
 
 from langgraph_events import Foldable, FoldReducer, IntegrationEvent
 
@@ -56,4 +57,41 @@ def rejects_state_shape_mismatch() -> None:
         event_type=Incremented,
         default_factory=lambda: {"n": 0},
         fold=lambda state, event: 5,  # type: ignore[arg-type, return-value]
+    )
+
+
+class Approved(IntegrationEvent):
+    item: UUID
+
+
+class Rejected(IntegrationEvent):
+    item: UUID
+
+
+def accepts_a_fold_typed_on_the_event_union() -> None:
+    # E names the events that fold reads, so fold can take its real union
+    # instead of Foldable or Any.
+    def done_items(done: list[UUID], event: Approved | Rejected) -> list[UUID]:
+        return [*done, event.item]
+
+    done = FoldReducer[list[UUID], Approved | Rejected](
+        name="done",
+        event_type=(Approved, Rejected),
+        default_factory=list,
+        fold=done_items,
+    )
+    assert_type(done.empty, list[UUID])
+    assert_type(done.seed([Approved(item=uuid4())]), list[UUID])
+
+
+def rejects_a_fold_narrower_than_the_event_type() -> None:
+    # A fold that reads only Approved cannot take every event of E.
+    def approved_items(done: list[UUID], event: Approved) -> list[UUID]:
+        return [*done, event.item]
+
+    FoldReducer[list[UUID], Approved | Rejected](
+        name="done",
+        event_type=(Approved, Rejected),
+        default_factory=list,
+        fold=approved_items,  # type: ignore[arg-type]
     )

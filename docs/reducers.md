@@ -176,6 +176,18 @@ def step(state: dict[str, int], event: Foldable) -> dict[str, int]:
     return event.fold(state)
 ```
 
+An explicit `fold=` that reads the real event union names it as a second type argument, `FoldReducer[S, E]`. `E` defaults to `Foldable`, and `S` stays the stored type that a handler annotates:
+
+```python
+...
+def done_items(done: list[UUID], event: Approved | Rejected) -> list[UUID]:
+    return [*done, event.item]
+
+done = FoldReducer[list[UUID], Approved | Rejected](
+    name="done", event_type=(Approved, Rejected), default_factory=list, fold=done_items
+)
+```
+
 To have mypy flag a `default_factory`/`fold` state-shape disagreement, pin the state type: `FoldReducer[dict[str, int]](...)`. Without a pin, mypy widens `S` to the join of the two and does not catch the mismatch. The generic does not propagate to handler params. Those are injected by name at runtime.
 
 For a bespoke channel, subclass the public `BaseReducer` directly. It must implement `stored_type()`, which gives the declared type that readers name.
