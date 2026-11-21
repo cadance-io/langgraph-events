@@ -2424,7 +2424,7 @@ def describe_EventGraph():
 
             def it_starts_empty():
                 r = message_reducer()
-                assert r.default == []
+                assert r.empty == []
 
         def when_custom_channel_name():
 
@@ -6710,7 +6710,7 @@ def describe_a_reducer_added_after_a_thread_was_stored():
                 assert seen == [2, 5]
 
         def when_the_stored_state_is_the_wrapper_of_an_older_release():
-            # 0.51.1 or older stored the private wrapper of the fold events
+            # 0.54.2 or older stored the private wrapper of the fold events
             # as the state on such a thread. A stored wrapper is always that
             # defect.
 

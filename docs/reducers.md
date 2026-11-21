@@ -80,12 +80,12 @@ log = graph.invoke([
 
 ## `Reducer`
 
-List accumulator. The default merge is `operator.add`. Any LangGraph-compatible reducer function works, for example `add_messages` for id-based dedup. `Reducer[E, T]` stores `list[T]`, and `fn` returns `list[T]`. A merge that stores another item type needs a `FoldReducer` or a `BaseReducer` subclass.
+List accumulator. The default merge is `operator.add`. Any LangGraph-compatible reducer function works, for example `add_messages` for id-based dedup. `Reducer[E, T]` stores `list[T]`, and `fn` returns `list[T]`. A merge that stores another item type needs a `FoldReducer` or a `BaseReducer` subclass. A `Reducer` channel starts empty. For a non-empty start, use a `FoldReducer`.
 
 ```python
 ...
 history = Reducer[UserMsg, str](
-    name="history", event_type=UserMsg, fn=lambda e: [e.text], default=[]
+    name="history", event_type=UserMsg, fn=lambda e: [e.text]
 )
 ```
 

@@ -14,13 +14,13 @@ A `Reducer` channel now always starts empty. A non-empty starting state is the j
 
 | Before | Now | Fix |
 |---|---|---|
-| A `Reducer` could have a non-empty `default`, for example `default=["init"]`. An empty `pre_seed` list could not clear it, and a thread stored before the reducer existed never got it | A `Reducer` with a non-empty `default` raises `TypeError` at graph construction that names the reducer | Use `FoldReducer[list[T]](default_factory=..., fold=lambda state, event: state + fn(event))`, or remove the default and send the starting items as seed events |
+| `Reducer` had a `default=` field. A non-empty value was the starting state of a new thread. An empty `pre_seed` list could not clear it, and a thread stored before the reducer existed never got it | The `default=` field is removed, and a `Reducer` channel starts empty. `Reducer(..., default=...)` raises `TypeError` for an unexpected keyword argument | Remove `default=[]`. For a non-empty start, use `FoldReducer[list[T]](name=..., event_type=..., default_factory=lambda: [...], fold=lambda state, event: reducer(state, fn(event)))`, where `reducer` is the old `reducer=` (default `operator.add`). Or send the starting items as seed events. A thread stored before this release keeps the starting items that its checkpoint already holds |
 | `message_reducer(default)` took a list of starting messages, for example a `SystemMessage` | The `default` parameter is removed. `message_reducer()` takes only `name=` | Send the system prompt as a seed event, for example `SystemPromptSet.from_str(...)` |
 
 ### Fixed
 
 - A `FoldReducer` added to a graph now folds the writes of a thread that a checkpoint
-  stored before the reducer existed. The checkpoint holds no value for the new channel,
+  stored before the reducer existed. Releases 0.54.2 and older have this defect. The checkpoint holds no value for the new channel,
   and only the first run of a thread wrote the initial fold state. So the first write
   stored the private wrapper of the fold events as the state, each reader got that
   wrapper, and the next write raised `TypeError` in the fold. The channel now starts at

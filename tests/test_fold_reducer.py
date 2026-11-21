@@ -387,6 +387,34 @@ def describe_FoldReducer_in_a_graph():
                     graph.invoke(Logged(line="new"), config=config)
                     assert captured[0] == ["new"]
 
+            def with_None():
+
+                def it_folds_from_None():
+                    from langgraph_events import FoldReducer
+
+                    captured: list[list[str | None] | None] = []
+                    log = FoldReducer[list[str | None] | None](
+                        name="log",
+                        event_type=Logged,
+                        default_factory=lambda: ["init"],
+                        fold=lambda state, event: [*(state or [None]), event.line],
+                    )
+
+                    @on(Logged)
+                    def capture(
+                        event: Logged, log: list[str | None] | None
+                    ) -> Completed:
+                        captured.append(log)
+                        return Completed(result="ok")
+
+                    graph = EventGraph(
+                        [capture], reducers=[log], checkpointer=MemorySaver()
+                    )
+                    config = {"configurable": {"thread_id": "fold-preseed-none"}}
+                    graph.pre_seed(config, {"log": None})
+                    graph.invoke(Logged(line="new"), config=config)
+                    assert captured[0] == [None, "new"]
+
         def when_fold_state_is_itself_a_list():
 
             def it_does_not_mistake_pre_seeded_list_for_events():

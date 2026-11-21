@@ -360,7 +360,6 @@ messages = Reducer[MessageEvent | RunPaused, BaseMessage](
     event_type=(MessageEvent, RunPaused),
     fn=project,
     reducer=add_messages,
-    default=[],
 )
 ```
 

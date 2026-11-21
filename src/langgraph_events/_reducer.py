@@ -301,7 +301,7 @@ class BaseReducer(ABC):
 
     @abstractmethod
     def seed(self, events: list[Event]) -> object:
-        """Initialize with default + seed event contributions."""
+        """The starting state of the channel, built from the seed events."""
 
     @property
     def sources(self) -> tuple[BaseReducer, ...]:
@@ -423,7 +423,6 @@ class Reducer[E, T](BaseReducer):
     event_type: type[E] | tuple[type[E], ...] | types.UnionType = field(kw_only=True)
     fn: Callable[[E], list[T]] = field(kw_only=True)
     reducer: ReducerFn = field(kw_only=True, default=operator.add)
-    default: list[T] = field(kw_only=True, default_factory=list)
     namespace: type[Namespace] | None = field(kw_only=True, default=None)
     _declared: tuple[object, ...] = field(
         kw_only=True, default=(), repr=False, compare=False
@@ -434,7 +433,7 @@ class Reducer[E, T](BaseReducer):
 
     @property
     def empty(self) -> list[Any]:
-        return list(self.default)
+        return []
 
     def collect(self, events: list[Event]) -> list[Any]:
         contributions: list[Any] = []
@@ -461,17 +460,7 @@ class Reducer[E, T](BaseReducer):
 
     def stored_type(self) -> object:
         """``list[T]``, from ``Reducer[E, T]``. When ``fn`` has a return
-        annotation, it must be ``list[T]`` too. Raises ``TypeError`` for a
-        non-empty ``default``: an empty ``pre_seed`` list cannot clear it, and
-        a thread stored before the reducer existed never gets it."""
-        if self.default:
-            raise TypeError(
-                f"{type(self).__name__} {self.name!r} has the non-empty default "
-                f"{self.default!r}. A non-empty starting state is the job of a "
-                f"FoldReducer: use FoldReducer[list[T]](default_factory=..., "
-                f"fold=lambda state, event: state + fn(event)). Or remove the "
-                f"default, and send the starting items as seed events."
-            )
+        annotation, it must be ``list[T]`` too."""
         item = self._declared_argument(
             Reducer, f"Reducer[{_type_name(self.event_type)}, T]"
         )
@@ -651,7 +640,7 @@ class _FoldChannel(BinaryOperatorAggregate[Any]):
         if not channel.is_available():
             channel.value = self.initial()
         elif isinstance(channel.value, _Contributions):
-            # 0.51.1 or older stored the wrapper as the state on a thread
+            # 0.54.2 or older stored the wrapper as the state on a thread
             # stored before the reducer existed. The wrapper is private, so a
             # stored one is always that defect: fold it into the initial state.
             channel.value = channel.operator(self.initial(), channel.value)

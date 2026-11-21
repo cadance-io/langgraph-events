@@ -346,7 +346,7 @@ rebuilt = replay_reducer(my_reducer, events)
 # Write `rebuilt` back through the put API of the checkpointer.
 ```
 
-`replay_reducer` is a thin wrapper around `BaseReducer.seed(events)`. The reducer default, the namespace filter and the `event_type` predicate all apply.
+`replay_reducer` is a thin wrapper around `BaseReducer.seed(events)`. The `ScalarReducer` default, the `FoldReducer` `default_factory`, the namespace filter and the `event_type` predicate all apply.
 
 Strict mode demotes an unrecognised class to a raw kwargs `dict` instead of a malformed object. The first consumer access then raises `AttributeError` or `TypeError`. Process-wide, `export LANGGRAPH_STRICT_MSGPACK=true`, for development and CI. Per serde, `NamespaceAwareSerde(..., allowed_msgpack_modules=[("module", "ClassName"), ...])`, for production. Strict mode does not raise at the serde boundary. To fail at the read instead of at the first access, rebuild the value with `replay_reducer`.
 
