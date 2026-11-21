@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+A `Reducer` channel now always starts empty. A non-empty starting state is the job of a
+`FoldReducer`, whose channel starts at `default_factory()` on every thread.
+
+| Before | Now | Fix |
+|---|---|---|
+| `Reducer` had a `default=` field. A non-empty value was the starting state of a new thread. An empty `pre_seed` list could not clear it, and a thread stored before the reducer existed never got it | The `default=` field is removed, and a `Reducer` channel starts empty. `Reducer(..., default=...)` raises `TypeError` for an unexpected keyword argument | Remove `default=[]`. For a non-empty start, use `FoldReducer[list[T]](name=..., event_type=..., default_factory=lambda: [...], fold=lambda state, event: reducer(state, fn(event)))`, where `reducer` is the old `reducer=` (default `operator.add`). Or send the starting items as seed events. A thread stored before this release keeps the starting items that its checkpoint already holds |
+| `message_reducer(default)` took a list of starting messages, for example a `SystemMessage` | The `default` parameter is removed. `message_reducer()` takes only `name=` | Send the system prompt as a seed event, for example `SystemPromptSet.from_str(...)` |
+
+### Fixed
+
+- A `FoldReducer` added to a graph now folds the writes of a thread that a checkpoint
+  stored before the reducer existed. Releases 0.54.2 and older have this defect. The checkpoint holds no value for the new channel,
+  and only the first run of a thread wrote the initial fold state. So the first write
+  stored the private wrapper of the fold events as the state, each reader got that
+  wrapper, and the next write raised `TypeError` in the fold. The channel now starts at
+  `default_factory()`, so each write folds into it, on every path that writes: a run, a
+  handler, a resume. A `Derived` that reads the channel now gets the folded state too. A
+  `ScalarReducer` did not have this defect. Until the first write on such a thread, each
+  load calls `default_factory()`, so it must return an equal new value on each call.
+- A thread that this defect already damaged heals on load. Its checkpoint stores the
+  private wrapper as the fold state. The load now folds that wrapper into
+  `default_factory()`, and the next write folds into the result.
+- A `FoldReducer` that `pre_seed` sets to `[]` or `None` keeps that state on the first run,
+  and the first run folds into it. Before, the first run replaced it with
+  `default_factory()`.
+
 ## [0.54.2] - 2026-11-19
 
 ### Fixed
