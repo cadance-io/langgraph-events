@@ -690,7 +690,7 @@ class FoldReducer[S, E = Foldable](BaseReducer):
     """
 
     name: str = ""
-    event_type: EventTypeSpec = field(kw_only=True)
+    event_type: type[E] | tuple[type[E], ...] | types.UnionType = field(kw_only=True)
     default_factory: Callable[[], S] = field(kw_only=True)
     fold: Callable[[S, E], S | _ResetType | SkipType] = field(
         kw_only=True, default=lambda state, event: event.fold(state)
@@ -747,9 +747,9 @@ class FoldReducer[S, E = Foldable](BaseReducer):
 
     def _fold_events(self, state: S, events: list[Event]) -> S:
         for event in events:
-            # ``collect``'s event_type filter guarantees every event here is
-            # an ``E`` at runtime; the cast bridges the Event-typed internal
-            # stream to ``fold``'s ``E`` parameter.
+            # ``event_type`` is typed against ``E``, and ``collect`` filters
+            # by it, so every event here is an ``E``. The cast bridges the
+            # Event-typed internal stream to ``fold``'s ``E`` parameter.
             result = self.fold(state, cast("E", event))
             # isinstance (not ``is``) so mypy narrows the result to ``S`` in
             # the else branch — SKIP/RESET are the sole instances of their

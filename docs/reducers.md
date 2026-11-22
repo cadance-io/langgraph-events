@@ -11,7 +11,7 @@ Each reducer declares the type it stores, by a subscription at construction. The
 |---|---|---|
 | `Reducer` | `Reducer[E, T](...)` | `list[T]` |
 | `ScalarReducer` | `ScalarReducer[E, T](...)` | `T`, or `T \| None` when `default` is `None` |
-| `FoldReducer` | `FoldReducer[S](...)` | `S` |
+| `FoldReducer` | `FoldReducer[S](...)` or `FoldReducer[S, E](...)` | `S` |
 
 `E` is the event type that `fn` reads. mypy checks `fn` against `E` and `T`, a lambda too. Graph construction refuses a reducer with no type argument, or with a type argument that names no class yet, such as a string or a type variable. The message names the reducer and the subscription to write. When `fn` has a return annotation, it must resolve and name `T` (`list[T]` for a `Reducer`). A `ScalarReducer.fn` can add `SkipType`. A `Reducer` does not support `SKIP`, so its `fn` returns an empty list for no contribution, and an annotation with `SkipType` raises `TypeError`.
 
@@ -154,11 +154,11 @@ counter = FoldReducer[dict[str, int]](
 )
 ```
 
-`fold` returns the new state (any value, including `None`), `RESET` to clear the channel back to `default_factory()`, or `SKIP` to leave it unchanged. Pass an explicit `fold=lambda state, event: ...` for an event that carries no `fold` method. The fold state can be any type, a `list` too. `default_factory` must return an equal new value on each call: a thread stored before the reducer joined the graph holds no state for it, so each load calls `default_factory()` until the first write. Like `ScalarReducer`, a non-`None` handler annotation opts into the [`ReducerNotSetError`](#scalar-reducer-required) assertion.
+`fold` returns the new state (any value, including `None`), `RESET` to clear the channel back to `default_factory()`, or `SKIP` to leave it unchanged. For an event that carries no `fold` method, pass an explicit `fold=lambda state, event: ...` and name the event type: `FoldReducer[S, E](...)`. The fold state can be any type, a `list` too. `default_factory` must return an equal new value on each call: a thread stored before the reducer joined the graph holds no state for it, so each load calls `default_factory()` until the first write. Like `ScalarReducer`, a non-`None` handler annotation opts into the [`ReducerNotSetError`](#scalar-reducer-required) assertion.
 
 ### Typing { #fold-typing }
 
-`FoldReducer` is generic over its state type `S`, so `reducer.empty` and `reducer.seed(...)` are typed (not `Any`). mypy can infer `S` from `default_factory`, but the running program cannot read an inferred type, so graph construction needs the subscription `FoldReducer[S](...)`:
+`FoldReducer[S, E]` is generic over its state type `S` and its event type `E`, so `reducer.empty` and `reducer.seed(...)` are typed (not `Any`). mypy can infer `S` from `default_factory`, but the running program cannot read an inferred type, so graph construction needs the subscription `FoldReducer[S](...)` or `FoldReducer[S, E](...)`:
 
 ```python
 ...
@@ -168,7 +168,7 @@ counter = FoldReducer[dict[str, int]](
 reveal_type(counter.empty)   # dict[str, int]
 ```
 
-The event argument is typed against `Foldable`, a `@runtime_checkable` Protocol satisfied **structurally**. Your event needs only a `fold` method. Do **not** inherit `Foldable`, because it clashes with the event metaclass. An explicit `fold=` function annotates its event parameter as `Foldable`, or leaves it inferred:
+The event argument is typed against `Foldable`, a `@runtime_checkable` Protocol satisfied **structurally**. Your event needs only a `fold` method. Do **not** inherit `Foldable`, because it clashes with the event metaclass. An explicit `fold=` function annotates its event parameter as `Foldable`, as the real event union that `E` names, or leaves it inferred:
 
 ```python
 ...
@@ -176,10 +176,22 @@ def step(state: dict[str, int], event: Foldable) -> dict[str, int]:
     return event.fold(state)
 ```
 
-An explicit `fold=` that reads the real event union names it as a second type argument, `FoldReducer[S, E]`. `E` defaults to `Foldable`, and `S` stays the stored type that a handler annotates:
+An explicit `fold=` that reads the real event union names it as a second type argument, `FoldReducer[S, E]`. mypy checks `event_type` and `fold` against `E`. `E` defaults to `Foldable`, and `S` stays the stored type that a handler annotates. Unlike `Reducer[E, T]`, the event type comes second, because `E` has a default. An event that carries no `fold` method is not `Foldable`, so its reducer must name `E`:
 
 ```python
-...
+from uuid import UUID
+
+from langgraph_events import FoldReducer, IntegrationEvent
+
+
+class Approved(IntegrationEvent):
+    item: UUID
+
+
+class Rejected(IntegrationEvent):
+    item: UUID
+
+
 def done_items(done: list[UUID], event: Approved | Rejected) -> list[UUID]:
     return [*done, event.item]
 

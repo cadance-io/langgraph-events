@@ -7,13 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+`FoldReducer.event_type` is now typed against the event type `E`, as on `Reducer` and
+`ScalarReducer`.
+
+| Before | Now | Fix |
+|---|---|---|
+| `FoldReducer.event_type` accepted any event class, and `E` did not exist. A `FoldReducer[S]` could name events that carry no `fold` method | `event_type` is `type[E] \| tuple[type[E], ...] \| types.UnionType`, and `E` defaults to `Foldable`. Where `E` stays `Foldable`, mypy refuses an event with no `fold` method, for example in a subclass `class Done(FoldReducer[S])` or an annotation `FoldReducer[S]`. mypy 1.19 infers `E` from the arguments of a call `FoldReducer[S](...)`, so that call form still passes | Name the event type: `FoldReducer[S, A \| B](...)`, with an explicit `fold=` for events that carry no `fold` method |
+
 ### Added
 
 - `FoldReducer` takes an optional second type argument, the event type `E`, as
   `FoldReducer[S, E]`. An explicit `fold=` can then annotate its event as the real event
   union, for example `def fold(done: list[UUID], event: A | B) -> list[UUID]`, and mypy
-  accepts it. Before, `fold` had to take `Foldable` or `Any`. `E` defaults to `Foldable`,
-  so `FoldReducer[S]` works as before. `S` stays the stored type that a handler annotates.
+  accepts it. Before, `fold` had to take `Foldable` or `Any`. `E` defaults to `Foldable`.
+  `S` stays the stored type that a handler annotates.
 
 ## [0.55.0] - 2026-11-21
 

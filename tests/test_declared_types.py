@@ -528,7 +528,7 @@ def describe_a_generic_subclass_of_a_reducer():
 
     def when_the_subclass_leaves_the_event_type_of_a_fold_reducer_out():
         def it_reads_the_state_type():
-            folded = _Folded[int](name="value", event_type=Set, default_factory=int)
+            folded = _Folded[int](name="value", event_type=Added, default_factory=int)
 
             EventGraph([_reads_value(int)], reducers=[folded])
 

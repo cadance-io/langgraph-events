@@ -95,3 +95,42 @@ def rejects_a_fold_narrower_than_the_event_type() -> None:
         default_factory=list,
         fold=approved_items,  # type: ignore[arg-type]
     )
+
+
+def _approved_items(done: list[UUID], event: Approved) -> list[UUID]:
+    return [*done, event.item]
+
+
+def rejects_an_event_type_wider_than_E() -> None:
+    # event_type is typed against E, so it cannot name an event outside E.
+    FoldReducer[list[UUID], Approved](
+        name="done",
+        event_type=(Approved, Rejected),  # type: ignore[arg-type]
+        default_factory=list,
+        fold=_approved_items,
+    )
+
+
+def rejects_swapped_type_arguments() -> None:
+    # The state type comes first: FoldReducer[S, E], not FoldReducer[E, S].
+    FoldReducer[Approved | Rejected, list[UUID]](
+        name="done",
+        event_type=(Approved, Rejected),  # type: ignore[arg-type]
+        default_factory=list,  # type: ignore[arg-type]
+        fold=_approved_items,  # type: ignore[arg-type]
+    )
+
+
+class _DoneItems(FoldReducer[list[UUID]]):
+    """A subclass that leaves E out, so E is Foldable."""
+
+
+def rejects_a_foldless_event_for_the_default_event_type() -> None:
+    # E defaults to Foldable, and an event without a fold method is not
+    # Foldable, so the reducer must name E. (mypy infers E from the arguments
+    # of a call such as FoldReducer[S](...), so the subclass pins it here.)
+    _DoneItems(
+        name="done",
+        event_type=(Approved, Rejected),  # type: ignore[arg-type]
+        default_factory=list,
+    )
