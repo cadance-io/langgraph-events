@@ -171,7 +171,7 @@ Each source declares its type, and a reader annotates that type exactly:
 |---|---|
 | `Reducer[E, T]` | `list[T]` |
 | `ScalarReducer[E, T]` | `T`, or `T \| None` when `default` is `None` |
-| `FoldReducer[S]` | `S` |
+| `FoldReducer[S, E]` | `S` |
 | `Derived` | the return annotation of `fn`. A class gives itself |
 | A field of the `services=` object | the field type |
 | A `RunScoped[T]` field | `T`. The return annotation of the factory must be `T` too |

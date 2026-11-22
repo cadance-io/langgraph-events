@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+`FoldReducer.event_type` is now typed against the event type `E`, as on `Reducer` and
+`ScalarReducer`. mypy checks a class or a tuple, not the members of an `A | B` spec. A
+`FoldReducer` with the default fold refuses at construction an event class that has no
+`fold` method.
+
+| Before | Now | Fix |
+|---|---|---|
+| `FoldReducer.event_type` accepted any event class, and 0.55.0 had no `E`. A `FoldReducer[S]` could name events that carry no `fold` method | `event_type` is `type[E] \| tuple[type[E], ...] \| types.UnionType`, and `E` defaults to `Foldable`. mypy checks a class or a tuple `event_type` against `E`, but not the members of an `A \| B` spec. Where `E` stays `Foldable`, mypy refuses a class or a tuple with an event that has no `fold` method, for example in a subclass `class Done(FoldReducer[S])` or an annotation `FoldReducer[S]`. A `FoldReducer` with no `fold=` raises `TypeError` at construction, and after `dataclasses.replace`, when a class of `event_type` has no `fold` method. This also covers the call `FoldReducer[S](...)`, where mypy 1.19 infers `E` from the arguments | Name the event type: `FoldReducer[S, A \| B](...)`, with an explicit `fold=` for events that carry no `fold` method. Or give the base class a `fold(self, state)` method that the subclasses override: construction refuses a base class without `fold`, even when every subclass has one |
+
+### Added
+
+- `FoldReducer` takes an optional second type argument, the event type `E`, as
+  `FoldReducer[S, E]`. An explicit `fold=` can then annotate its event as the real event
+  union, for example `def fold(done: list[UUID], event: A | B) -> list[UUID]`, and mypy
+  accepts it. Before, `fold` had to take `Foldable` or `Any`. `E` defaults to `Foldable`.
+  `S` stays the stored type that a handler annotates.
+
 ## [0.55.0] - 2026-11-21
 
 ### Breaking

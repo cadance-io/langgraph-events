@@ -500,6 +500,10 @@ class _Swapped[Item, Kind](ScalarReducer[Kind, Item]):
     pass
 
 
+class _Folded[State](FoldReducer[State]):
+    pass
+
+
 def _reads_value(annotation: object) -> Any:
     @on(Asked)
     def show(event: Asked, value: Any) -> None:
@@ -521,6 +525,12 @@ def describe_a_generic_subclass_of_a_reducer():
             swapped = _Swapped[int, Set](name="value", event_type=Set, fn=lambda e: 1)
 
             EventGraph([_reads_value(int | None)], reducers=[swapped])
+
+    def when_the_subclass_leaves_the_event_type_of_a_fold_reducer_out():
+        def it_reads_the_state_type():
+            folded = _Folded[int](name="value", event_type=Added, default_factory=int)
+
+            EventGraph([_reads_value(int)], reducers=[folded])
 
 
 _Free = TypeVar("_Free")

@@ -1,5 +1,6 @@
 """Tests for FoldReducer — folds matching events into accumulating state."""
 
+import pytest
 from conftest import Completed, Started
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -202,6 +203,143 @@ def describe_Foldable():
             from langgraph_events import Foldable
 
             assert not isinstance(Started(data="x"), Foldable)
+
+
+class Approved(IntegrationEvent):
+    item: str = ""
+
+
+class Rejected(IntegrationEvent):
+    item: str = ""
+
+
+def _done_items(done: list[str], event: Approved | Rejected) -> list[str]:
+    return [*done, event.item]
+
+
+def _done() -> object:
+    from langgraph_events import FoldReducer
+
+    return FoldReducer[list[str], Approved | Rejected](
+        name="done",
+        event_type=(Approved, Rejected),
+        default_factory=list,
+        fold=_done_items,
+    )
+
+
+def describe_FoldReducer_event_type_parameter():
+
+    def when_the_event_type_is_given():
+
+        def it_folds_the_events_through_the_explicit_fold():
+            done = _done()
+            assert done.seed([Approved(item="a"), Rejected(item="b")]) == ["a", "b"]
+
+        def it_gives_the_state_type_as_the_stored_type():
+            assert _done().stored_type() == list[str]
+
+        def it_injects_the_state_into_a_handler_that_reads_it():
+            captured: list[list[str]] = []
+
+            @on(Started)
+            def approve(event: Started) -> Approved:
+                return Approved(item="a")
+
+            @on(Approved)
+            def capture(event: Approved, done: list[str]) -> Completed:
+                captured.append(done)
+                return Completed(result="ok")
+
+            EventGraph([approve, capture], reducers=[_done()]).invoke(
+                Started(data="go")
+            )
+            assert captured == [["a"]]
+
+        def it_refuses_a_handler_that_annotates_the_event_type():
+            @on(Started)
+            def capture(event: Started, done: Approved | Rejected) -> Completed:
+                return Completed(result="ok")
+
+            with pytest.raises(TypeError, match=r"reducer 'done' gives list\[str\]"):
+                EventGraph([capture], reducers=[_done()])
+
+    def when_the_event_type_is_omitted():
+
+        def it_gives_the_state_type_as_the_stored_type():
+            from langgraph_events import FoldReducer
+
+            counter = FoldReducer[dict[str, int]](
+                name="counter",
+                event_type=Incremented,
+                default_factory=lambda: {"n": 0},
+            )
+            assert counter.stored_type() == dict[str, int]
+
+        def it_injects_the_state_into_a_handler_that_reads_it():
+            captured: list[dict] = []
+
+            @on(Started)
+            def emit(event: Started) -> Incremented:
+                return Incremented(by=3)
+
+            @on(Incremented)
+            def capture(event: Incremented, counter: dict) -> Completed:
+                captured.append(counter)
+                return Completed(result="ok")
+
+            EventGraph([emit, capture], reducers=[_counter()]).invoke(
+                Started(data="go")
+            )
+            assert captured == [{"n": 3}]
+
+
+def describe_FoldReducer_default_fold():
+
+    def when_an_event_class_has_no_fold_method():
+
+        def it_refuses_the_reducer_at_construction():
+            from langgraph_events import FoldReducer
+
+            with pytest.raises(TypeError) as raised:
+                FoldReducer[list[str], Approved | Incremented](
+                    name="done",
+                    event_type=(Approved, Incremented),
+                    default_factory=list,
+                )
+            assert str(raised.value) == (
+                "FoldReducer 'done' uses the default fold, but Approved has no "
+                "fold method. Give the event a fold(self, state) method, or pass "
+                "fold= and name the event type as FoldReducer[S, E]."
+            )
+
+        def it_refuses_a_copy_made_by_dataclasses_replace():
+            import dataclasses
+
+            from langgraph_events import FoldReducer
+
+            counter = FoldReducer[dict](
+                name="counter",
+                event_type=Incremented,
+                default_factory=lambda: {"n": 0},
+            )
+            with pytest.raises(TypeError, match="Approved has no fold method"):
+                dataclasses.replace(counter, event_type=Approved)
+
+        def it_accepts_an_explicit_fold():
+            assert _done().seed([Approved(item="a")]) == ["a"]
+
+    def when_every_event_class_has_a_fold_method():
+
+        def it_accepts_the_reducer():
+            from langgraph_events import FoldReducer
+
+            counter = FoldReducer[dict](
+                name="counter",
+                event_type=Incremented | Reset,
+                default_factory=lambda: {"n": 0},
+            )
+            assert counter.seed([Incremented(by=2)]) == {"n": 2}
 
 
 class Logged(IntegrationEvent):
