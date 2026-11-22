@@ -338,7 +338,7 @@ def describe_MigrationKey():
             [
                 "",
                 "rename",
-                "move app.events:Order",
+                "relabel app.events:Order",
                 "rename app.events.Order",
                 "fill app.events:Order",
                 "transform app.events:Order",

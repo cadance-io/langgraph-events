@@ -27,7 +27,7 @@ from typing import (
 )
 
 from langgraph_events._event import Event, _iter_nested_events
-from langgraph_events._identity import Identity
+from langgraph_events._identity import Identity, ValueIdentity
 from langgraph_events._labels import distinct_labels
 
 if TYPE_CHECKING:
@@ -166,7 +166,20 @@ class SplitEvent:
         object.__setattr__(self, "targets", targets)
 
 
-Operation = RenameEvent | AddField | TransformFields | SplitEvent
+@dataclass(frozen=True)
+class MoveValue:
+    """The stored value identity ``(old_module, old_name)`` now revives as
+    *target*, an enum, a dataclass or a pydantic model.
+
+    The key names the stored source, as a rename key does.
+    """
+
+    old_module: str
+    old_name: str
+    target: type
+
+
+Operation = RenameEvent | AddField | TransformFields | SplitEvent | MoveValue
 
 
 @dataclass(frozen=True)
@@ -378,7 +391,7 @@ def _target_identity(
     return module, qualname
 
 
-MigrationKind = typing.Literal["rename", "fill", "transform", "split"]
+MigrationKind = typing.Literal["rename", "fill", "transform", "split", "move"]
 _KINDS: tuple[MigrationKind, ...] = typing.get_args(MigrationKind)
 _IDENT = r"[^\W\d]\w*"
 _QUALPART = rf"(?:{_IDENT}|<locals>|<lambda>)"
@@ -407,7 +420,8 @@ class MigrationKey:
     ``rename`` key names the stored source identity. A ``fill`` key names
     the identity it fills and the ``field``. A ``transform`` or ``split``
     key names the identity and ``via``, the ``module:qualname`` of the
-    transform or select callable. The stage is not stored: a key is in the
+    transform or select callable. A ``move`` key names the stored source
+    identity of a value class. The stage is not stored: a key is in the
     origin stage when its identity is a rename source of the same set.
     """
 
@@ -667,6 +681,7 @@ class MigrationTables:
     transform_table: dict[tuple[str, str], TransformFields]
     origin_transform_table: dict[tuple[str, str], TransformFields]
     split_table: dict[tuple[str, str], SplitEvent]
+    value_move_table: dict[tuple[str, str], type]
 
     def _named(self) -> tuple[tuple[str, dict[tuple[str, str], Any]], ...]:
         return (
@@ -676,6 +691,7 @@ class MigrationTables:
             ("TransformFields", self.transform_table),
             ("origin TransformFields", self.origin_transform_table),
             ("SplitEvent", self.split_table),
+            ("MoveValue", self.value_move_table),
         )
 
     def keys(self) -> frozenset[MigrationKey]:
@@ -708,6 +724,7 @@ class MigrationTables:
                     )
                     for op in self.split_table.values()
                 ),
+                *(MigrationKey("move", *source) for source in self.value_move_table),
             )
         )
 
@@ -783,6 +800,17 @@ class MigrationTables:
                 "stored event into two on a payload value' in "
                 "docs/event-migrations.md."
             )
+        # An old release cannot import the new module, and the write path
+        # has no way to name the old one.
+        if self.value_move_table:
+            raise ValueError(
+                "legacy_write=True cannot be combined with a MoveValue or "
+                "@migrate_value_from. An old release cannot read the new "
+                "module of the value. Drain in-flight threads before the "
+                "cutover, or drop legacy_write and accept read-only "
+                "compatibility. See 'Moving a value class' in "
+                "docs/event-migrations.md."
+            )
 
     def migrate(
         self, module: str, qualname: str, kwargs: dict[str, Any]
@@ -851,6 +879,7 @@ def _flatten_and_validate(
     addfield_ops: list[tuple[AddField, str]] = []
     transform_ops: list[tuple[TransformFields, str]] = []
     split_ops: list[tuple[SplitEvent, str]] = []
+    value_moves: list[MoveValue] = []
     for migration in migrations:
         for op in migration.operations:
             if isinstance(op, RenameEvent):
@@ -874,6 +903,8 @@ def _flatten_and_validate(
                 transform_ops.append((op, migration.name))
             elif isinstance(op, SplitEvent):
                 split_ops.append((op, migration.name))
+            elif isinstance(op, MoveValue):
+                value_moves.append(op)
             else:
                 # ``Operation`` is closed by design. Silently ignoring an
                 # unknown type hides authoring errors — surface them at
@@ -881,8 +912,8 @@ def _flatten_and_validate(
                 raise TypeError(
                     f"Unknown migration operation type "
                     f"{type(op).__name__!r} in {_migration_label(migration.name)}. "
-                    f"Expected RenameEvent, AddField, TransformFields or "
-                    f"SplitEvent."
+                    f"Expected RenameEvent, AddField, TransformFields, "
+                    f"SplitEvent or MoveValue."
                 )
 
     rename_table: dict[tuple[str, str], tuple[str, str]] = {}
@@ -903,7 +934,55 @@ def _flatten_and_validate(
         transform_table,
         origin_transform_table,
         split_table,
+        _value_move_table(value_moves),
     )
+
+
+def _value_move_table(moves: Sequence[MoveValue]) -> dict[tuple[str, str], type]:
+    """Key each move on its stored source, and validate it.
+
+    A source can still import the target, because the relabel runs before
+    the import. A source that resolves to another class is refused, because
+    the move would hide that class.
+
+    Raises:
+        ValueError: on an invalid target or source.
+    """
+    table: dict[tuple[str, str], type] = {}
+    for op in moves:
+        source = (op.old_module, op.old_name)
+        label = f"MoveValue({op.old_module}:{op.old_name!r})"
+        if isinstance(op.target, type) and issubclass(op.target, Event):
+            raise ValueError(
+                f"{label}: the target {op.target.__qualname__} is an event. "
+                f"Use @migrate_from for an event."
+            )
+        try:
+            target = ValueIdentity.of(op.target)
+        except ValueError as error:
+            raise ValueError(f"{label}: {error}") from error
+        if source == tuple(target):
+            raise ValueError(f"{label} moves onto itself. Remove the move.")
+        if table.get(source, op.target) is not op.target:
+            raise ValueError(
+                f"{label} has two targets: {table[source].__qualname__} and "
+                f"{op.target.__qualname__}. Each source maps to one class."
+            )
+        if Identity(*source).owned_by_library:
+            raise ValueError(
+                f"{label}: this library owns that module. Do not move its names."
+            )
+        try:
+            live = getattr(importlib.import_module(op.old_module), op.old_name, None)
+        except Exception:  # an import failure of any type means "no live class"
+            live = None
+        if isinstance(live, type) and live is not op.target:
+            raise ValueError(
+                f"{label} names another live class, {live.__qualname__}. A move "
+                f"would hide that class on read."
+            )
+        table[source] = op.target
+    return table
 
 
 def _bucket_splits(
@@ -1400,6 +1479,41 @@ def _split_kwargs(
 _MIGRATE_FROM_ATTR = "__lge_migrate_from__"
 _ORIGIN_BACKFILL_ATTR = "__lge_origin_backfill__"
 _ORIGIN_TRANSFORM_ATTR = "__lge_origin_transform__"
+_VALUE_SOURCES_ATTR = "__lge_value_sources__"
+
+
+def migrate_value_from(
+    *old_modules: str, name: str | None = None
+) -> Callable[[type], type]:
+    """Revive a value class that a checkpoint stores under an old module.
+
+    Decorate the enum, dataclass or pydantic model at its new location::
+
+        @migrate_value_from("shop.old_types")
+        class Currency(StrEnum):
+            EUR = "eur"
+
+    *name* is the stored ``__name__`` when the class was also renamed. The
+    read relabels the old identity at any depth, and ``rewrite --apply``
+    writes the new module back. The release rule then asks you to delete
+    the decorator.
+
+    Raises:
+        ValueError: when no old module is given.
+    """
+    if not old_modules:
+        raise ValueError("migrate_value_from needs at least one old module.")
+
+    def decorate(cls: type) -> type:
+        sources = tuple((module, name or cls.__name__) for module in old_modules)
+        setattr(
+            cls,
+            _VALUE_SOURCES_ATTR,
+            (*cls.__dict__.get(_VALUE_SOURCES_ATTR, ()), *sources),
+        )
+        return cls
+
+    return decorate
 
 
 def migrate_from(
@@ -1707,22 +1821,6 @@ def _is_pydantic_model(tp: object) -> TypeGuard[type]:
     )
 
 
-def _importable_by_name(cls: type) -> bool:
-    """Whether ``getattr(import_module(cls.__module__), cls.__name__)`` is
-    *cls*. That lookup is how the LangGraph serializer revives a pydantic
-    payload, so this is the exact condition for a silent raw-dict miss.
-
-    Any import failure counts as a miss. Upstream catches ``Exception``
-    on the same call, and a serde constructor must not surface an
-    unrelated import-time traceback from the payload's module.
-    """
-    try:
-        module = importlib.import_module(cls.__module__)
-    except Exception:
-        return False
-    return getattr(module, cls.__name__, None) is cls
-
-
 def _enclosing_names(cls: type) -> dict[str, Any]:
     """Names visible from *cls*'s enclosing class bodies, outermost first.
 
@@ -1758,29 +1856,6 @@ def _field_hints(cls: type) -> dict[str, Any]:
         cls, localns=_enclosing_names(cls), format=annotationlib.Format.FORWARDREF
     )
     return {name: tp for name, tp in hints.items() if name in names}
-
-
-def _unimportable_payload_models(
-    classes: Iterable[type],
-) -> list[tuple[type, str, type]]:
-    """``(event class, field name, model class)`` for every pydantic model
-    reachable from an event field annotation whose ``(module, __name__)``
-    does not resolve back to the model (#167).
-
-    Walks generic arguments, so ``list[Holder.Cfg] | None`` reaches
-    ``Holder.Cfg``. Does not descend into a model's own fields: a model
-    nested inside another model is dumped and re-validated as a dict by
-    pydantic itself, so its identity is never stored. A model held
-    behind ``Any`` or an untyped container is not reachable from an
-    annotation and is not checked.
-    """
-    out: list[tuple[type, str, type]] = []
-    for cls in classes:
-        for field, tp in _field_hints(cls).items():
-            for inner in _annotation_types(tp):
-                if _is_pydantic_model(inner) and not _importable_by_name(inner):
-                    out.append((cls, field, inner))
-    return out
 
 
 def _init_fields(cls: type) -> frozenset[str]:

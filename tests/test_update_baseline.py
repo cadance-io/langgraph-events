@@ -45,13 +45,13 @@ if TYPE_CHECKING:
 
 def describe_update_baseline():
     def when_no_baseline_exists_yet():
-        def it_writes_a_version_4_file(tmp_path: Path):
+        def it_writes_a_version_5_file(tmp_path: Path):
             target = _target(tmp_path, Renamed)
 
             update_baseline(target)
 
             assert _read(target.baseline) == {
-                "version": 4,
+                "version": 5,
                 "events": [
                     {**_entry(_MODULE, "Renamed.Place", ["note"]), "live": ["note"]},
                     {
@@ -62,6 +62,7 @@ def describe_update_baseline():
                 "retired": [],
                 "handlers": [{"name": "Renamed.Place"}],
                 "migrations": [{"label": f"rename {_MODULE}:Renamed.Placed"}],
+                "values": [],
             }
 
     def when_the_serde_reads_an_event_no_handler_produces():

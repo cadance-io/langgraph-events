@@ -10,23 +10,28 @@ import typing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, Literal
 
+from langgraph_events.serde._values import live_value_class
 from langgraph_events.serde.migrations._baseline import (
     Baseline,
     Hold,
     MigrationRecord,
     MigrationsUnrecorded,
+    ValuesUnrecorded,
 )
 from langgraph_events.serde.migrations._core import (
     PROGRAM,
     TARGET_PLACEHOLDER,
     MigrationKey,
 )
-from langgraph_events.serde.migrations._revive import revival_failure
+from langgraph_events.serde.migrations._revive import (
+    revival_failure,
+    value_revival_failure,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from langgraph_events._identity import Identity
+    from langgraph_events._identity import Identity, ValueIdentity
     from langgraph_events.serde.migrations._target import MigrationTarget, Snapshot
 
 Rule = Literal["baseline", "names", "coverage", "revive", "handlers", "release"]
@@ -240,6 +245,49 @@ class Unrevivable:
 
 
 @dataclass(frozen=True)
+class UncoveredValue:
+    """A recorded value identity that its module does not define and that
+    no move names. An import left at the old module does not cover it."""
+
+    code: ClassVar[str] = "uncovered-value"
+    identity: ValueIdentity
+
+    @property
+    def subject(self) -> str:
+        return self.identity.label
+
+    def lines(self, invocation: Invocation) -> tuple[str, ...]:
+        """The explanation, then the next command."""
+        return (
+            "No class defined at this identity and no move covers it, so a "
+            "stored value of it reads back as raw data.",
+            f"Add @migrate_value_from({self.identity.module!r}) to the class "
+            f"that replaces it, then run: {invocation.baseline_update()}",
+        )
+
+
+@dataclass(frozen=True)
+class UnrevivableValue:
+    """A recorded value identity whose synthesized record does not read
+    back as exactly its live class."""
+
+    code: ClassVar[str] = "unrevivable-value"
+    identity: ValueIdentity
+    error: str
+
+    @property
+    def subject(self) -> str:
+        return self.identity.label
+
+    def lines(self, invocation: Invocation) -> tuple[str, ...]:
+        """The read error, then the next command."""
+        return (
+            f"A stored value of this identity does not revive: {self.error}.",
+            f"Fix the class or the allowlist, then run: {invocation.baseline_update()}",
+        )
+
+
+@dataclass(frozen=True)
 class HandlerMissing:
     """A recorded handler node name that no live handler or alias has."""
 
@@ -298,6 +346,8 @@ Finding = (
     | MigrationOutOfScope
     | Uncovered
     | Unrevivable
+    | UncoveredValue
+    | UnrevivableValue
     | HandlerMissing
     | SurvivedRelease
 )
@@ -382,6 +432,7 @@ def check(target: MigrationTarget, *, previous: Path | None = None) -> GateRepor
     )
     findings.extend(MigrationOutOfScope(i) for i in code.migrations_out_of_scope())
     findings.extend(_coverage_and_revival(code, judged))
+    findings.extend(_value_findings(code, judged))
     findings.extend(
         HandlerMissing(name)
         for name in sorted(
@@ -529,6 +580,25 @@ def _coverage_and_revival(
             findings.append(
                 Unrevivable(identity, retired=identity in judged.retired, error=failure)
             )
+    return findings
+
+
+def _value_findings(
+    code: Snapshot, judged: Baseline
+) -> list[UncoveredValue | UnrevivableValue]:
+    """The ``coverage`` and ``revive`` rules for each recorded value."""
+    if isinstance(judged.values, ValuesUnrecorded):
+        return []
+    moves = code.serde._client_tables.value_move_table
+    findings: list[UncoveredValue | UnrevivableValue] = []
+    for identity, kind in sorted(judged.values.items()):
+        live = moves.get(identity) or live_value_class(*identity)
+        if live is None:
+            findings.append(UncoveredValue(identity))
+            continue
+        failure = value_revival_failure(code.serde, identity, kind, live)
+        if failure is not None:
+            findings.append(UnrevivableValue(identity, failure))
     return findings
 
 

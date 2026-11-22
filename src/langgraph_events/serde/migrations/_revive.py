@@ -6,7 +6,7 @@ behind it.
 """
 
 import dataclasses
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import ormsgpack
 
@@ -15,7 +15,13 @@ import ormsgpack
 # tripwire). ``EXT_NAMESPACE_AWARE_EVENT`` is defined in ``_jsonplus`` and
 # importing that module first means its LangGraph-drift smoke fence runs
 # before the line below, so the actionable error is still preserved.
-from langgraph.checkpoint.serde.jsonplus import _option
+from langgraph.checkpoint.serde.jsonplus import (
+    EXT_CONSTRUCTOR_KW_ARGS,
+    EXT_CONSTRUCTOR_SINGLE_ARG,
+    EXT_PYDANTIC_V1,
+    EXT_PYDANTIC_V2,
+    _option,
+)
 
 from langgraph_events._event import Event
 from langgraph_events._identity import Identity
@@ -23,14 +29,17 @@ from langgraph_events.serde._jsonplus import (
     _UNEXPECTED_KWARG_RE,
     EXT_NAMESPACE_AWARE_EVENT,
 )
+from langgraph_events.serde._values import value_kind
 from langgraph_events.serde.migrations._core import (
     _resolve_identity,
     _resolve_rename,
 )
 
 if TYPE_CHECKING:
+    import enum
     from collections.abc import Mapping
 
+    from langgraph_events._identity import ValueIdentity, ValueKind
     from langgraph_events.serde._jsonplus import NamespaceAwareSerde
 
 
@@ -70,6 +79,60 @@ def revival_failure(
     if Identity(*identity).owned_by_library:
         return _resolve_failure(serde, identity)
     return _revive_failure(serde, identity, recorded)
+
+
+def value_revival_failure(
+    serde: NamespaceAwareSerde,
+    identity: ValueIdentity,
+    kind: ValueKind,
+    live: type,
+) -> str | None:
+    """Why a stored record of the value *identity* does not revive as
+    exactly *live*, or ``None``.
+
+    The record goes through the real read path, so the allowlist judges
+    the identity that LangGraph sees after the relabel. A dataclass gets
+    ``None`` per init field. Its constructor can refuse that placeholder,
+    and LangGraph then gives ``None``. That is not a finding: the class
+    resolved, and an allowlist miss gives the raw kwargs instead.
+    """
+    if value_kind(live) != kind:
+        return (
+            f"the baseline records a {kind}, and {live.__qualname__} is a "
+            f"{value_kind(live) or 'class of another kind'}"
+        )
+    record = _value_record(identity, kind, live)
+    if record is None:
+        return None
+    code, fields = record
+    inner = ormsgpack.packb(fields, option=_option)
+    data = ormsgpack.packb(ormsgpack.Ext(code, inner), option=_option)
+    revived = serde.loads_typed(("msgpack", data))
+    if type(revived) is live or (kind == "dataclass" and revived is None):
+        return None
+    return (
+        f"LangGraph returned {type(revived).__name__}, not {live.__qualname__}. "
+        f"Add ({live.__module__!r}, {live.__name__!r}) to allowed_msgpack_modules"
+    )
+
+
+def _value_record(
+    identity: ValueIdentity, kind: ValueKind, live: type
+) -> tuple[int, list[Any]] | None:
+    """The ext code and payload of a synthesized record, or ``None`` for an
+    enum with no member, which no store can hold."""
+    head: list[Any] = [identity.module, identity.name]
+    if kind == "enum":
+        member = next(iter(cast("type[enum.Enum]", live)), None)
+        if member is None:
+            return None
+        return EXT_CONSTRUCTOR_SINGLE_ARG, [*head, member.value]
+    if kind == "dataclass":
+        kwargs = dict.fromkeys(f.name for f in dataclasses.fields(live) if f.init)
+        return EXT_CONSTRUCTOR_KW_ARGS, [*head, kwargs]
+    if callable(getattr(live, "model_dump", None)):
+        return EXT_PYDANTIC_V2, [*head, {}, "model_validate_json"]
+    return EXT_PYDANTIC_V1, [*head, {}]
 
 
 def _resolve_failure(

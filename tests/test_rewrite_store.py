@@ -1576,7 +1576,13 @@ def describe_rewrite_store_refusals():
             serde = NamespaceAwareSerde(events=(Started,))
 
             problem, _identities = _verify_value(
-                serde, [Started(), object()], "events", set(), set(), frozenset()
+                serde,
+                [Started(), object()],
+                "events",
+                set(),
+                set(),
+                frozenset(),
+                frozenset(),
             )
 
             assert problem is not None

@@ -313,7 +313,7 @@ def describe_gate_commands():
                 spec = _install(monkeypatch, target)
 
                 assert main(["baseline", "update", spec]) == 0
-                assert _read(target.baseline)["version"] == 4
+                assert _read(target.baseline)["version"] == 5
 
         def when_a_shipped_migration_left_the_code():
             def it_exits_two_and_prints_the_callers_command(

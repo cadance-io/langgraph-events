@@ -1,5 +1,6 @@
 """EventTopology: the handlers, reducers and namespaces of a graph."""
 
+import contextlib
 import dataclasses
 import functools
 import inspect
@@ -703,7 +704,11 @@ class EventTopology:
         return tuple(self._namespaces.values()), tuple(events)
 
     def serde(
-        self, migrations: Sequence[Migration] = (), *, legacy_write: bool = False
+        self,
+        migrations: Sequence[Migration] = (),
+        *,
+        values: Sequence[type] = (),
+        legacy_write: bool = False,
     ) -> NamespaceAwareSerde:
         """Build a ``NamespaceAwareSerde`` that reads every event class of
         the topology.
@@ -713,7 +718,9 @@ class EventTopology:
         retired event. It collects each ``@migrate_from`` and ``@backfill``
         on those classes.
         ``EventGraph.from_namespaces(..., checkpointer=...)`` wires the same
-        serde. *migrations* and *legacy_write* go to the serde unchanged.
+        serde. *migrations*, *values* and *legacy_write* go to the serde
+        unchanged. The stored type of each reducer reaches the serde, so
+        a value class in a channel is a stored identity.
         An :class:`EventStore` needs it for a rewrite::
 
             saver.serde = topology.serde()
@@ -726,8 +733,18 @@ class EventTopology:
             migrations,
             namespaces=namespaces,
             events=events,
+            channel_types=self._channel_types(),
+            values=values,
             legacy_write=legacy_write,
         )
+
+    def _channel_types(self) -> dict[str, object]:
+        """The stored type of each reducer that declares one."""
+        types_by_channel: dict[str, object] = {}
+        for name, reducer in self._reducers.items():
+            with contextlib.suppress(TypeError):
+                types_by_channel[name] = reducer.stored_type()
+        return types_by_channel
 
     def namespaces(self) -> NamespaceModel:
         """Return a :class:`NamespaceModel` — the code-derived snapshot.

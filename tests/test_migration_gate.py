@@ -210,7 +210,7 @@ def describe_check():
 
                 (finding,) = check(target).findings
 
-                assert finding == BaselineStale(("~ version 3 -> 4",), ())
+                assert finding == BaselineStale(("~ version 3 -> 5",), ())
 
         def when_a_recorded_class_transform_follows_a_rename():
             def it_reports_no_deleted_migration(tmp_path: Path):

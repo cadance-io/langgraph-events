@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from langgraph_events.serde._jsonplus import (
         DecodedValue,
         NamespaceAwareSerde,
-        ReadRecord,
+        StoredRead,
         UnrevivedIdentity,
     )
 
@@ -157,15 +157,36 @@ def validate_drop(
     return tuple(classes)
 
 
-def _migrated_pairs(reads: Sequence[ReadRecord]) -> tuple[tuple[str, str], ...]:
+def _migrated_pairs(reads: Sequence[StoredRead]) -> tuple[tuple[str, str], ...]:
     """The touched records as ``(stored, live)`` labels, deduped in read
     order."""
     pairs: list[tuple[str, str]] = []
-    for stored, live, touched, _built in reads:
-        pair = (Identity(*stored).label, Identity(*live).label)
-        if touched and pair not in pairs:
+    for read in reads:
+        pair = (Identity(*read.stored).label, Identity(*read.resolved).label)
+        if read.touched and pair not in pairs:
             pairs.append(pair)
     return tuple(pairs)
+
+
+def _lost_values(reads: Sequence[StoredRead]) -> str | None:
+    """Why a recorded value stops this write, or ``None``.
+
+    LangGraph gives back raw data for a value it cannot revive. A write
+    would store that raw data under no class, so the value is lost.
+    """
+    from langgraph_events.serde._values import ValueRead  # noqa: PLC0415
+
+    lost = dict.fromkeys(
+        Identity(*read.resolved).label
+        for read in reads
+        if isinstance(read, ValueRead) and not read.revived
+    )
+    if not lost:
+        return None
+    return (
+        f"{', '.join(lost)} reads back as raw data, so a rewrite would store "
+        f"the loss. Fix the class or allowed_msgpack_modules, then rerun"
+    )
 
 
 def _interrupt_payloads(writes: Sequence[tuple[str, str, Any]]) -> list[Any]:
@@ -237,12 +258,15 @@ def plan_thread(
     exactly, not the class hierarchy: the rule ``validate_drop`` and the
     byte scan apply.
     """
+    from langgraph_events.serde._jsonplus import EventRead  # noqa: PLC0415
+    from langgraph_events.serde._values import ValueRead  # noqa: PLC0415
+
     reads = [record for _value, records in decoded for record in records]
     pairs = _migrated_pairs(reads)
     values: dict[str, Any] = tup.checkpoint["channel_values"]
     dropped = _count_drops(values, drop)
     drop_identities = {(cls.__module__, cls.__qualname__) for cls in drop}
-    present = any(live in drop_identities for _stored, live, *_ in reads)
+    present = any(read.resolved in drop_identities for read in reads)
 
     def refused(reason: str) -> ThreadRewrite:
         return ThreadRewrite(
@@ -256,14 +280,22 @@ def plan_thread(
     if not pairs and not dropped and not present:
         return ThreadRewrite(thread_id, "unchanged")
 
-    reason = _pending_refusal(pending, values, drop, decoded)
+    reason = _lost_values(reads) or _pending_refusal(pending, values, drop, decoded)
     if reason is not None:
         return refused(reason)
 
     interrupt_writes = tuple(w for w in pending if w[1] == _INTERRUPT_CHANNEL)
     new_values, changed = _drop_from_log(values, drop)
     checkpoint = _copy_checkpoint(tup.checkpoint, new_values)
-    built = frozenset(id(value) for *_, values in reads for value in values)
+    built = frozenset(
+        id(value)
+        for read in reads
+        if isinstance(read, EventRead)
+        for value in read.built
+    )
+    moved = frozenset(
+        read.resolved for read in reads if isinstance(read, ValueRead) and read.touched
+    )
     reason, new_versions = _verify_and_bump(
         serde,
         checkpoint,
@@ -271,6 +303,7 @@ def plan_thread(
         interrupt_writes,
         drop_identities,
         built,
+        moved,
         next_version,
     )
     if reason is not None:
@@ -421,7 +454,7 @@ def _pending_refusal(
 def _write_problem(
     channel: str,
     value: object,
-    records: Sequence[ReadRecord],
+    records: Sequence[StoredRead],
     drop: tuple[type[Event], ...],
     *,
     shifts: bool,
@@ -437,11 +470,11 @@ def _write_problem(
     an ``events`` entry. A position in the write then names another event.
     """
     dropped = {(cls.__module__, cls.__qualname__) for cls in drop}
-    for stored, live, touched, _built in records:
-        if live in dropped:
-            return f"holds {Identity(*live).label}, a class in drop"
-        if touched:
-            return f"holds {Identity(*stored).label}, which a migration rewrites"
+    for read in records:
+        if read.resolved in dropped:
+            return f"holds {Identity(*read.resolved).label}, a class in drop"
+        if read.touched:
+            return f"holds {Identity(*read.stored).label}, which a migration rewrites"
     if shifts and channel in _POSITION_WRITES and value not in (None, []):
         return (
             "holds an index into channel 'events', and drop removes an event "
@@ -457,19 +490,21 @@ def _verify_and_bump(
     interrupt_writes: Sequence[tuple[str, str, Any]],
     forbidden: set[tuple[str, str]],
     built: frozenset[int],
+    moved: frozenset[tuple[str, str]],
     next_version: Callable[[Any, None], Any],
 ) -> tuple[str | None, dict[str, Any]]:
     """Verify every value ``put`` will encode, and bump the version of
-    each channel whose value changed or carries an event. *built* holds
-    the ``id()`` of each field value a migration built. Returns the
+    each channel whose value changed, carries an event, or holds a value
+    of *moved*. A saver stores a blob only for a bumped channel. *built*
+    holds the ``id()`` of each field value a migration built. Returns the
     refusal reason, or ``None`` and the ``new_versions`` for ``put``."""
-    historic = set(serde._tables.rename_table)
+    historic = {*serde._tables.rename_table, *serde._tables.value_move_table}
     versions: dict[str, Any] = checkpoint["channel_versions"]
     new_versions: dict[str, Any] = {}
     for channel, value in checkpoint["channel_values"].items():
         where = f"channel {channel!r}"
         problem, identities = _verify_value(
-            serde, value, where, forbidden, historic, built
+            serde, value, where, forbidden, historic, built, moved
         )
         if problem is not None:
             return problem, {}
@@ -482,7 +517,7 @@ def _verify_and_bump(
     for _task_id, channel, value in interrupt_writes:
         where = f"the pending {channel} write"
         problem, _identities = _verify_value(
-            serde, value, where, forbidden, historic, built
+            serde, value, where, forbidden, historic, built, moved
         )
         if problem is not None:
             return problem, {}
@@ -613,6 +648,7 @@ def _verify_value(
     forbidden: set[tuple[str, str]],
     historic: set[tuple[str, str]],
     built: frozenset[int],
+    moved: frozenset[tuple[str, str]],
 ) -> tuple[str | None, list[tuple[str, str]]]:
     """Encode *value* the way ``put`` will, then prove the bytes name no
     dropped or historic identity and revive under the strict serde, and
@@ -621,11 +657,14 @@ def _verify_value(
     *where* names the value in a refusal, ``"channel 'events'"`` or
     ``"the pending __interrupt__ write"``. Returns ``(problem,
     identities)``. *problem* is ``None`` when the value passed.
-    *identities* lists every event identity the bytes hold, so the
-    caller knows whether the channel carries an event.
+    *identities* lists every event identity the bytes hold and each value
+    identity of *moved*, so the caller knows that the channel needs a write.
     """
     from langgraph_events.serde._jsonplus import (  # noqa: PLC0415
         _scan_identities,
+    )
+    from langgraph_events.serde._values import (  # noqa: PLC0415
+        stored_value_identities,
     )
 
     try:
@@ -649,6 +688,14 @@ def _verify_value(
                 f"the re-encode still names historic identity {identity[1]} in {where}",
                 [],
             )
+    stored_values = stored_value_identities(data[1])
+    stale = sorted(stored_values & historic)
+    if stale:
+        return (
+            f"the re-encode still names historic identity {stale[0][1]} in {where}",
+            [],
+        )
+    identities = [*identities, *sorted(stored_values & moved)]
     return _revival_problem(serde, data, value, where, built), identities
 
 
