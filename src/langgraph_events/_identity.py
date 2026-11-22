@@ -41,6 +41,21 @@ ValueKind = Literal["enum", "dataclass", "model"]
 """The kinds of value class that LangGraph stores by name."""
 
 
+def live_value_class(module: str, name: str) -> type | None:
+    """The class that *module* itself defines under *name*, or ``None``.
+
+    A class that *module* only imports does not count, because the bytes
+    that name *module* then depend on an import that nothing records.
+    """
+    try:
+        found = getattr(importlib.import_module(module), name, None)
+    except Exception:  # an import failure of any type means "not live"
+        return None
+    if isinstance(found, type) and (found.__module__, found.__name__) == (module, name):
+        return found
+    return None
+
+
 class ValueIdentity(NamedTuple):
     """The stored name of a value class: its module and its ``__name__``.
 
@@ -60,14 +75,7 @@ class ValueIdentity(NamedTuple):
             ValueError: when the module does not bind *value_cls* under its
                 ``__name__``.
         """
-        try:
-            module = importlib.import_module(value_cls.__module__)
-        except Exception as error:
-            raise ValueError(
-                f"Its checkpoint identity {value_cls.__module__}."
-                f"{value_cls.__name__} does not import ({error})."
-            ) from error
-        if getattr(module, value_cls.__name__, None) is value_cls:
+        if live_value_class(value_cls.__module__, value_cls.__name__) is value_cls:
             return cls(value_cls.__module__, value_cls.__name__)
         remedy = (
             f"Move {value_cls.__qualname__} to module scope in {value_cls.__module__}."

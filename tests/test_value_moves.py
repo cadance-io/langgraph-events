@@ -5,9 +5,9 @@ import enum
 import json
 import sys
 import types
-from dataclasses import dataclass
-from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict
 
 import ormsgpack
 import pydantic
@@ -33,6 +33,7 @@ from langgraph_events.serde import (
 )
 from langgraph_events.serde.migrations import (
     BaselineStale,
+    Invocation,
     Migration,
     MigrationTarget,
     MoveValue,
@@ -43,7 +44,7 @@ from langgraph_events.serde.migrations import (
     rewrite_live_set,
     update_baseline,
 )
-from langgraph_events.serde.migrations._baseline import Baseline, ValuesUnrecorded
+from langgraph_events.serde.migrations._baseline import Baseline
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -116,8 +117,46 @@ class Validated:
             raise ValueError("count is required")
 
 
-class HoldsValidated(IntegrationEvent):
-    validated: Validated | None = None
+@dataclass
+class Exported:
+    count: int
+
+    def dict(self) -> dict[str, int]:
+        return {"count": self.count}
+
+
+class Dated(enum.Enum):
+    START = date(2020, 1, 1)
+
+
+@dataclass
+class Derived:
+    count: int
+    total: int = field(init=False, default=0)
+
+
+class OtherSlot(TypedDict):
+    other: Other
+
+
+class OtherPair(NamedTuple):
+    other: Other
+
+
+class RefSlot(TypedDict):
+    ref: Ref
+    other: Other
+
+
+class SlotCard(pydantic.BaseModel):
+    slot: RefSlot
+
+
+class NestedEnumCard(pydantic.BaseModel):
+    class Kind(enum.Enum):
+        X = "x"
+
+    kind: Kind = Kind.X
 
 
 class Chosen(IntegrationEvent):
@@ -256,13 +295,6 @@ def describe_migrate_value_from():
 
             assert serde.loads_typed(data) is Moved.ON
 
-        def it_names_the_move_in_the_migration_keys():
-            serde = NamespaceAwareSerde(events=[HoldsMoved])
-
-            labels = {key.label for key in serde.client_migrations().keys}
-
-            assert labels == {f"move {_GONE}:Moved"}
-
     def when_the_decorated_class_is_not_an_enum():
         def it_revives_a_dataclass(temp_module: types.ModuleType):
             @migrate_value_from(_GONE)
@@ -316,40 +348,7 @@ def describe_migrate_value_from():
 
             assert serde.client_migrations().fingerprint == _EMPTY_FINGERPRINT
 
-        def it_hands_langgraph_the_stored_bytes_unchanged():
-            serde = NamespaceAwareSerde(events=[Held])
-            data = serde.dumps_typed(Priority.HIGH)
-            seen: list[bytes] = []
-            real = serde._unpack_ext_hook
-
-            def spy(code: int, payload: bytes) -> object:
-                seen.append(payload)
-                return real(code, payload)
-
-            serde._unpack_ext_hook = spy
-
-            serde.loads_typed(data)
-
-            assert seen == [ormsgpack.unpackb(data[1], ext_hook=lambda _c, p: p)]
-
     def when_a_move_is_declared():
-        def when_the_bytes_name_no_old_module():
-            def it_hands_langgraph_the_stored_bytes_unchanged():
-                serde = _serde()
-                data = serde.dumps_typed(Priority.HIGH)
-                seen: list[bytes] = []
-                real = serde._unpack_ext_hook
-
-                def spy(code: int, payload: bytes) -> object:
-                    seen.append(payload)
-                    return real(code, payload)
-
-                serde._unpack_ext_hook = spy
-
-                serde.loads_typed(data)
-
-                assert seen == [ormsgpack.unpackb(data[1], ext_hook=lambda _c, p: p)]
-
         def it_changes_the_fingerprint():
             assert _serde().client_migrations().fingerprint != _EMPTY_FINGERPRINT
 
@@ -377,38 +376,25 @@ def describe_migrate_value_from():
             assert (_HERE, "Card") in found[5]
 
     def when_a_move_is_invalid():
-        def it_refuses_a_source_equal_to_its_target():
-            with pytest.raises(ValueError, match="moves onto itself"):
-                NamespaceAwareSerde(
-                    [Migration((MoveValue(_HERE, "Priority", Priority),))]
-                )
-
-        def it_refuses_an_event_target():
-            with pytest.raises(ValueError, match="is an event"):
-                NamespaceAwareSerde([Migration((MoveValue(_GONE, "Held", Held),))])
-
-        def it_refuses_two_targets_for_one_source():
-            with pytest.raises(ValueError, match="two targets"):
-                NamespaceAwareSerde(
-                    [
-                        Migration(
-                            (
-                                MoveValue(_GONE, "X", Priority),
-                                MoveValue(_GONE, "X", Other),
-                            )
-                        )
-                    ]
-                )
-
-        def it_refuses_a_source_of_this_library():
-            with pytest.raises(ValueError, match="this library owns"):
-                NamespaceAwareSerde(
-                    [Migration((MoveValue("langgraph_events.x", "Y", Priority),))]
-                )
-
-        def it_refuses_a_source_that_is_another_live_class():
-            with pytest.raises(ValueError, match="another live class"):
-                NamespaceAwareSerde([Migration((MoveValue(_HERE, "Other", Priority),))])
+        @pytest.mark.parametrize(
+            ("operations", "match"),
+            [
+                ((MoveValue(_HERE, "Priority", Priority),), "moves onto itself"),
+                ((MoveValue(_GONE, "Held", Held),), "is an event"),
+                (
+                    (MoveValue(_GONE, "X", Priority), MoveValue(_GONE, "X", Other)),
+                    "two targets",
+                ),
+                (
+                    (MoveValue("langgraph_events.x", "Y", Priority),),
+                    "this library owns",
+                ),
+                ((MoveValue(_HERE, "Other", Priority),), "another live class"),
+            ],
+        )
+        def it_refuses_the_move(operations: tuple[MoveValue, ...], match: str):
+            with pytest.raises(ValueError, match=match):
+                NamespaceAwareSerde([Migration(operations)])
 
         def it_refuses_legacy_write():
             with pytest.raises(ValueError, match="legacy_write"):
@@ -444,58 +430,42 @@ def describe_NamespaceAwareSerde():
 
             assert serde.value_identities() == {(_HERE, "Other"): "enum"}
 
-    def when_a_model_holds_an_enum():
-        def it_records_the_model_and_the_enum():
-            serde = NamespaceAwareSerde(values=[Card])
+    def when_a_container_type_holds_a_value():
+        @pytest.mark.parametrize("container", [OtherSlot, OtherPair])
+        def it_records_the_value_and_not_the_container(container: type):
+            serde = NamespaceAwareSerde(channel_types={"slot": container})
 
-            assert serde.value_identities() == {
-                (_HERE, "Card"): "model",
-                (_HERE, "Priority"): "enum",
-            }
+            assert serde.value_identities() == {(_HERE, "Other"): "enum"}
 
+        def when_a_model_holds_the_container():
+            def it_records_only_the_enums_below_the_model():
+                serde = NamespaceAwareSerde(values=[SlotCard])
 
-def describe_record_reads():
-    def when_a_move_applies():
-        def it_records_a_touched_value_read():
-            data = _old_bytes(lambda old: old.Priority.HIGH)
-            serde = _serde()
-
-            with serde._record_reads() as reads:
-                serde.loads_typed(data)
-
-            assert [(r.stored, r.resolved, r.revived, r.touched) for r in reads] == [
-                ((_GONE, "Priority"), (_HERE, "Priority"), True, True)
-            ]
-
-    def when_a_recorded_dataclass_lost_a_field():
-        def it_records_a_value_that_did_not_revive():
-            serde = NamespaceAwareSerde(events=[HoldsBase])
-
-            with serde._record_reads() as reads:
-                serde.loads_typed(_record(2, _HERE, "Base", {"a": 1}))
-
-            assert [r.revived for r in reads] == [False]
-
-        def when_a_subclass_instance_revives_beside_it():
-            def it_judges_each_record_on_its_exact_type():
-                lost = _record(2, _HERE, "Base", {"a": 1})
-                kept = _record(2, _HERE, "Sub", {"a": 1})
-                data = ormsgpack.packb(
-                    [
-                        ormsgpack.unpackb(lost[1], ext_hook=ormsgpack.Ext),
-                        ormsgpack.unpackb(kept[1], ext_hook=ormsgpack.Ext),
-                    ],
-                    option=_option,
-                )
-                serde = NamespaceAwareSerde(events=[HoldsBase])
-
-                with serde._record_reads() as reads:
-                    serde.loads_typed(("msgpack", data))
-
-                assert {r.stored[1]: r.revived for r in reads} == {
-                    "Base": False,
-                    "Sub": True,
+                assert serde.value_identities() == {
+                    (_HERE, "SlotCard"): "model",
+                    (_HERE, "Other"): "enum",
+                    (_HERE, "Priority"): "enum",
                 }
+
+    def when_a_model_holds_a_nested_enum():
+        def it_records_the_model_alone():
+            serde = NamespaceAwareSerde(values=[NestedEnumCard])
+
+            assert serde.value_identities() == {(_HERE, "NestedEnumCard"): "model"}
+
+    def when_a_values_root_sits_in_a_module_named_like_the_standard_library():
+        def it_records_the_class(monkeypatch: pytest.MonkeyPatch):
+            module = types.ModuleType("tabnanny")
+            monkeypatch.setitem(sys.modules, "tabnanny", module)
+
+            class Local(enum.Enum):
+                ONE = 1
+
+            _bind(module, Local)
+
+            serde = NamespaceAwareSerde(values=[Local])
+
+            assert serde.value_identities() == {("tabnanny", "Local"): "enum"}
 
 
 def _cfg(thread_id: str) -> dict[str, dict[str, str]]:
@@ -520,6 +490,12 @@ def _choose(event: Started) -> Chosen:
 def _current_graph(saver: BaseCheckpointSaver[Any]) -> EventGraph:
     reducer = _reducer(Ref, Priority)
     saver.serde = EventTopology([_choose], reducers=[reducer]).serde(_MOVES)
+    return EventGraph([_choose], reducers=[reducer], checkpointer=saver)
+
+
+def _retired_graph(saver: BaseCheckpointSaver[Any]) -> EventGraph:
+    reducer = _reducer(Ref, Priority)
+    saver.serde = EventTopology([_choose], reducers=[reducer]).serde()
     return EventGraph([_choose], reducers=[reducer], checkpointer=saver)
 
 
@@ -595,77 +571,35 @@ def _pending(saver: MemorySaver, thread_id: str) -> list[Any]:
     return list(saver.writes[(thread_id, "", checkpoint_id)].values())
 
 
+@pytest.fixture(params=["memory", "sqlite", "postgres"])
+def any_saver(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Any]:
+    if request.param == "memory":
+        yield MemorySaver()
+    elif request.param == "sqlite":
+        from langgraph.checkpoint.sqlite import SqliteSaver
+
+        with SqliteSaver.from_conn_string(str(tmp_path / "s.db")) as saver:
+            yield saver
+    else:
+        from langgraph.checkpoint.postgres import PostgresSaver
+
+        url = request.getfixturevalue("postgres_url")
+        with PostgresSaver.from_conn_string(url) as saver:
+            yield saver
+
+
 def describe_rewrite_live_set():
     def when_a_value_moved():
-        def when_the_store_is_memory():
-            def it_writes_the_new_module_into_a_value_only_channel(tmp_path: Path):
-                saver = MemorySaver()
-                _seed_old(saver, "t1")
-                assert _GONE.encode() in _memory_blob(saver, "t1", "ref")
+        def it_stores_a_value_that_needs_no_move(any_saver: Any, tmp_path: Path):
+            _seed_old(any_saver, "t1")
 
-                _rewrite(_target(saver, tmp_path / "b.json"))
+            outcome = _rewrite(_target(any_saver, tmp_path / "b.json"))
 
-                blob = _memory_blob(saver, "t1", "ref")
-                assert _GONE.encode() not in blob
-                assert _HERE.encode() in blob
-
-            def it_reads_unchanged_on_a_second_pass(tmp_path: Path):
-                saver = MemorySaver()
-                _seed_old(saver, "t1")
-                target = _target(saver, tmp_path / "b.json")
-
-                outcome = _rewrite(target)
-
-                assert [t.status for t in outcome.final.threads] == ["unchanged"]
-
-            def it_keeps_the_revived_value(tmp_path: Path):
-                saver = MemorySaver()
-                _seed_old(saver, "t1")
-
-                _rewrite(_target(saver, tmp_path / "b.json"))
-
-                tup = saver.get_tuple(_cfg("t1"))
-                assert tup is not None
-                assert tup.checkpoint["channel_values"]["ref"] == Ref(1, Priority.HIGH)
-
-        def when_the_store_is_postgres():
-            def it_writes_the_new_module_into_a_value_only_channel(
-                tmp_path: Path, postgres_url: str
-            ):
-                import psycopg
-                from langgraph.checkpoint.postgres import PostgresSaver
-
-                with PostgresSaver.from_conn_string(postgres_url) as saver:
-                    _seed_old(saver, "t1")
-                    outcome = _rewrite(_target(saver, tmp_path / "b.json"))
-                    tup = saver.get_tuple(_cfg("t1"))
-
-                assert tup is not None
-                version = tup.checkpoint["channel_versions"]["ref"]
-                with psycopg.connect(postgres_url) as conn:
-                    row = conn.execute(
-                        "SELECT blob FROM checkpoint_blobs WHERE thread_id = 't1' "
-                        "AND channel = 'ref' AND version = %s",
-                        (version,),
-                    ).fetchone()
-                assert row is not None
-                assert _GONE.encode() not in bytes(row[0])
-                assert _HERE.encode() in bytes(row[0])
-                assert [t.status for t in outcome.final.threads] == ["unchanged"]
-
-        def when_the_store_is_sqlite():
-            def it_reads_unchanged_on_a_second_pass(tmp_path: Path):
-                from langgraph.checkpoint.sqlite import SqliteSaver
-
-                path = str(tmp_path / "s.db")
-                with SqliteSaver.from_conn_string(path) as saver:
-                    _seed_old(saver, "t1")
-                    outcome = _rewrite(_target(saver, tmp_path / "b.json"))
-                    tup = saver.get_tuple(_cfg("t1"))
-
-                assert tup is not None
-                assert tup.checkpoint["channel_values"]["ref"] == Ref(1, Priority.HIGH)
-                assert [t.status for t in outcome.final.threads] == ["unchanged"]
+            assert [t.status for t in outcome.final.threads] == ["unchanged"]
+            any_saver.serde = NamespaceAwareSerde(events=[Started, Chosen])
+            tup = any_saver.get_tuple(_cfg("t1"))
+            assert tup is not None
+            assert tup.checkpoint["channel_values"]["ref"] == Ref(1, Priority.HIGH)
 
     def when_an_event_field_holds_a_moved_value():
         def it_writes_the_new_module_into_the_log(tmp_path: Path):
@@ -734,7 +668,7 @@ def describe_rewrite_live_set():
             )
 
     def when_a_lost_value_sits_in_an_unchanged_thread():
-        def it_reads_unchanged(tmp_path: Path):
+        def it_reads_unchanged_and_names_the_value(tmp_path: Path):
             saver = MemorySaver()
             _current_graph(saver).invoke(Started(), config=_cfg("t1"))
             _store_blob(saver, "t1", "ref", [_ext(0, _HERE, "Priority", "no")])
@@ -743,6 +677,40 @@ def describe_rewrite_live_set():
             report = store.plan_rewrite(thread_ids=["t1"])
 
             assert [t.status for t in report.threads] == ["unchanged"]
+            assert report.threads[0].lost_values == (f"{_HERE}:Priority",)
+
+        def when_a_subclass_instance_revives_beside_it():
+            def it_names_only_the_lost_class(tmp_path: Path):
+                saver = MemorySaver()
+                _current_graph(saver).invoke(Started(), config=_cfg("t1"))
+                _store_blob(
+                    saver,
+                    "t1",
+                    "ref",
+                    [_ext(2, _HERE, "Base", {"a": 1}), _ext(2, _HERE, "Sub", {"a": 1})],
+                )
+                store = _target(saver, tmp_path / "b.json").build(saver).store
+
+                report = store.plan_rewrite(thread_ids=["t1"])
+
+                assert report.threads[0].lost_values == (f"{_HERE}:Base",)
+
+    def when_a_retired_move_left_old_bytes():
+        def it_reads_unchanged_and_names_the_value_in_the_output(tmp_path: Path):
+            saver = MemorySaver()
+            _seed_old(saver, "t1")
+            target = MigrationTarget(
+                graph=_retired_graph,
+                baseline=tmp_path / "b.json",
+                store=lambda: contextlib.nullcontext(saver),
+            )
+
+            outcome = _rewrite(target)
+
+            assert [t.status for t in outcome.final.threads] == ["unchanged"]
+            assert outcome.clean
+            rendered = outcome.render(Invocation("app:target"), "fingerprint")
+            assert f"t1: reads as raw data: {_GONE}:" in rendered
 
     def when_a_completed_task_write_holds_a_moved_value():
         def it_refuses_the_thread(tmp_path: Path):
@@ -773,9 +741,12 @@ def _plain_graph(saver: BaseCheckpointSaver[Any]) -> EventGraph:
     return EventGraph([_noop_moved], checkpointer=saver)
 
 
-def _validated_graph(saver: BaseCheckpointSaver[Any]) -> EventGraph:
-    saver.serde = NamespaceAwareSerde(events=[Started, HoldsValidated])
-    return EventGraph([_noop_moved], checkpointer=saver)
+def _values_graph(value: type) -> Any:
+    def graph(saver: BaseCheckpointSaver[Any]) -> EventGraph:
+        saver.serde = NamespaceAwareSerde(events=[Started], values=[value])
+        return EventGraph([_noop_moved], checkpointer=saver)
+
+    return graph
 
 
 def _strict_old_graph(saver: BaseCheckpointSaver[Any]) -> EventGraph:
@@ -855,14 +826,24 @@ def describe_migration_gate():
             assert f"{_GONE}:Priority" in {f.subject for f in found}
             assert found[0].code == "unrevivable-value"
 
-    def when_a_dataclass_refuses_the_none_placeholder():
-        def it_reports_no_finding(tmp_path: Path):
+    def when_a_healthy_class_cannot_take_a_placeholder():
+        @pytest.mark.parametrize("value", [Validated, Exported, Dated])
+        def it_reports_no_finding(value: type, tmp_path: Path):
             path = tmp_path / "b.json"
-            target = MigrationTarget(graph=_validated_graph, baseline=path)
+            target = MigrationTarget(graph=_values_graph(value), baseline=path)
 
             update_baseline(target)
 
             assert check(target).passed
+
+    def when_a_dataclass_has_an_init_false_field():
+        def it_reports_unrevivable_value(tmp_path: Path):
+            path = tmp_path / "b.json"
+            target = MigrationTarget(graph=_values_graph(Derived), baseline=path)
+
+            update_baseline(target)
+
+            assert [type(f) for f in check(target).findings] == [UnrevivableValue]
 
     def when_a_shipped_move_survives():
         def it_reports_survived_release(tmp_path: Path):
@@ -885,26 +866,15 @@ def describe_baseline_values():
 
             update_baseline(MigrationTarget(graph=_plain_graph, baseline=path))
 
-            assert json.loads(path.read_text())["values"] == [
+            raw = json.loads(path.read_text())
+            assert raw["version"] == 5
+            assert raw["values"] == [
                 {"kind": "model", "module": _HERE, "name": "Card"},
                 {"kind": "enum", "module": _HERE, "name": "Priority"},
                 {"kind": "dataclass", "module": _HERE, "name": "Ref"},
             ]
 
-        def it_writes_version_5(tmp_path: Path):
-            path = tmp_path / "b.json"
-
-            update_baseline(MigrationTarget(graph=_plain_graph, baseline=path))
-
-            assert json.loads(path.read_text())["version"] == 5
-
     def when_the_baseline_is_version_4():
-        def it_reads_values_as_unrecorded(tmp_path: Path):
-            path = tmp_path / "b.json"
-            path.write_text(json.dumps({"version": 4, "events": [], "migrations": []}))
-
-            assert Baseline.read(path).values == ValuesUnrecorded(4)
-
         def it_reports_a_stale_baseline(tmp_path: Path):
             path = tmp_path / "b.json"
             target = MigrationTarget(graph=_plain_graph, baseline=path)
@@ -918,6 +888,29 @@ def describe_baseline_values():
 
             stale = [f for f in report.findings if isinstance(f, BaselineStale)]
             assert "~ version 4 -> 5" in stale[0].changes
+
+        def when_it_is_the_previous_baseline():
+            def it_runs_the_release_rule(tmp_path: Path):
+                path = tmp_path / "b.json"
+                previous = tmp_path / "previous.json"
+                target = MigrationTarget(graph=_gate_graph, baseline=path)
+                update_baseline(target)
+                raw = json.loads(path.read_text())
+                del raw["values"]
+                raw["version"] = 4
+                previous.write_text(json.dumps(raw))
+
+                report = check(target, previous=previous)
+
+                assert "release" in report.rules_run
+                assert [type(f) for f in report.findings] == [SurvivedRelease]
+
+            def it_keeps_the_digest_of_the_earlier_release(tmp_path: Path):
+                path = tmp_path / "b.json"
+                raw = {"events": [], "retired": [], "handlers": [], "migrations": []}
+                path.write_text(json.dumps({"version": 4, **raw}))
+
+                assert Baseline.read(path).digest == "lge-b1-f1b48be375ecf9e1"
 
     def when_a_version_5_file_has_no_values():
         def it_refuses_the_file(tmp_path: Path):

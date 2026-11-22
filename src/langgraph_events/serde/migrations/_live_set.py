@@ -130,8 +130,16 @@ class LiveSetOutcome:
         checkpoint needs the action that its reason names first.
         """
         head = str(self.final).splitlines()[0]
+        lost = {
+            t.thread_id: t.lost_values_line
+            for report in (*self.passes, self.final)
+            for t in report.threads
+            if t.lost_values
+        }
         if self.clean:
-            return f"lge rewrite: clean (last plan: {head})"
+            return "\n".join(
+                (f"lge rewrite: clean (last plan: {head})", *lost.values())
+            )
         accepted = self.accepted(accept)
         if accepted:
             verdict = f"accepted, {self.verdict} (--accept {accept}; last plan: {head})"
@@ -150,6 +158,7 @@ class LiveSetOutcome:
                 lines.append(f"  {thread.thread_id}: needs a rewrite{drops}{suffix}")
             elif thread.status == "refused":
                 lines.append(f"  {thread.thread_id}: refused, {thread.reason}")
+        lines.extend(lost.values())
         if _to_rewrite(self.final) and (self.passes or not accepted):
             if self.passes:
                 noun = "pass" if len(self.passes) == 1 else "passes"

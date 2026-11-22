@@ -747,7 +747,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         of the ``with`` block.
 
         Yields a collector of :data:`StoredRead` entries. There is one
-        :class:`ValueRead` per record of a recorded value class, and one
+        :class:`ValueRead` per named record of a client class, and one
         :class:`EventRead` per stored ``EXT_NAMESPACE_AWARE_EVENT`` record
         that revived, wherever the record sat in the blob. A record that degraded to an
         :class:`UnrevivedIdentity` is not collected. The ``touched`` flag

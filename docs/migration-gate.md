@@ -77,7 +77,7 @@ def test_migration_gate() -> None:
 | `coverage` | `Uncovered` | A recorded identity has no live class and no migration. The finding names live classes with the same last name, a likely rename. | Add the migration, then `baseline update` |
 | `coverage` | `UncoveredValue` (`uncovered-value`) | A recorded value class is not defined at its identity, and no move names it. An import left at the old module does not cover it. | Add `@migrate_value_from`, then `baseline update` |
 | `revive` | `Unrevivable` | A synthesized payload of the recorded shape fails the real read path. | Add or fix the migration, then `baseline update` |
-| `revive` | `UnrevivableValue` (`unrevivable-value`) | A synthesized record of a recorded value does not read back as exactly its live class. An allowlist that names only the old module causes this. | Fix the class or `allowed_msgpack_modules`, then `baseline update` |
+| `revive` | `UnrevivableValue` (`unrevivable-value`) | LangGraph cannot rebuild a recorded value: its allowlist blocks the live class, for example because it names only the old module, or the dataclass has an `init=False` field. | Fix the class or `allowed_msgpack_modules`, then `baseline update` |
 | `handlers` | `HandlerMissing` | A recorded handler node name has no live handler and no `@on(previously=...)` alias. | Declare the alias, then `baseline update` |
 | `release` | `SurvivedRelease` | The previous release shipped this migration, and the code still holds it. | Delete the migration, then `baseline update --previous` |
 

@@ -7,10 +7,11 @@ bytes, at every depth, and then hands the bytes to LangGraph. LangGraph
 keeps the allowlist and every constructor.
 """
 
+import annotationlib
 import dataclasses
 import enum
-import importlib
 import sys
+import typing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
@@ -25,18 +26,20 @@ from langgraph.checkpoint.serde.jsonplus import (
 )
 
 from langgraph_events._event import Event, Namespace
-from langgraph_events._identity import ValueIdentity, ValueKind
+from langgraph_events._identity import ValueIdentity, ValueKind, live_value_class
 from langgraph_events.serde.migrations._core import (
     _VALUE_SOURCES_ATTR,
     Migration,
     MoveValue,
     _annotation_types,
+    _enclosing_names,
     _field_hints,
     _is_pydantic_model,
+    _unreachable_migrate_from_siblings,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping
+    from collections.abc import Callable, Collection, Iterable, Mapping
 
 _NAMED_RECORD_CODES = frozenset(
     {
@@ -55,16 +58,22 @@ _FRAMEWORK_ROOTS = frozenset(
 """Packages whose classes their own releases keep readable."""
 
 
-def value_kind(tp: object) -> ValueKind | None:
+def _client_module(module: str) -> bool:
+    """*module* is outside the standard library and the framework packages."""
+    root = module.partition(".")[0]
+    return root not in sys.stdlib_module_names and root not in _FRAMEWORK_ROOTS
+
+
+def value_kind(tp: object, first_party: Collection[str] = ()) -> ValueKind | None:
     """The kind of the value class *tp*, or ``None`` for any other type.
 
     An event, a namespace, a standard-library class and a framework class
-    are not value classes of the client.
+    are not value classes of the client, unless *first_party* names the
+    module of *tp*.
     """
     if not isinstance(tp, type) or issubclass(tp, (Event, Namespace)):
         return None
-    root = tp.__module__.partition(".")[0]
-    if root in sys.stdlib_module_names or root in _FRAMEWORK_ROOTS:
+    if tp.__module__ not in first_party and not _client_module(tp.__module__):
         return None
     if issubclass(tp, enum.Enum):
         return "enum"
@@ -73,12 +82,24 @@ def value_kind(tp: object) -> ValueKind | None:
     return "dataclass" if dataclasses.is_dataclass(tp) else None
 
 
+def _is_field_container(tp: object) -> bool:
+    """*tp* is a ``TypedDict`` or a ``NamedTuple``: no value class, but its
+    fields can hold one."""
+    return typing.is_typeddict(tp) or (
+        isinstance(tp, type) and issubclass(tp, tuple) and hasattr(tp, "_fields")
+    )
+
+
 def _value_hints(cls: type) -> Iterable[object]:
-    """The annotation of each stored field of the value class *cls*."""
-    if _is_pydantic_model(cls):
-        model_fields: Mapping[str, Any] = getattr(cls, "model_fields", {})
-        return [info.annotation for info in model_fields.values()]
-    return _field_hints(cls).values()
+    """The annotation of each stored field of *cls*."""
+    if _is_field_container(cls):
+        return typing.get_type_hints(
+            cls, localns=_enclosing_names(cls), format=annotationlib.Format.FORWARDREF
+        ).values()
+    if dataclasses.is_dataclass(cls):
+        return _field_hints(cls).values()
+    model_fields: Mapping[str, Any] = getattr(cls, "model_fields", {})
+    return [info.annotation for info in model_fields.values()]
 
 
 @dataclass(frozen=True)
@@ -88,10 +109,12 @@ class ValueScope:
     The walk starts at the event fields, the channel types and the explicit
     *roots*. Below a dataclass, each enum, dataclass or model is its own
     record. Below a pydantic model only an enum is, because a model dump
-    keeps an enum member and flattens the rest to a dict.
+    keeps an enum member and flattens the rest to a dict. A ``TypedDict`` or
+    a ``NamedTuple`` passes the walk through and is not recorded.
     """
 
     classes: Mapping[ValueIdentity, type]
+    kinds: dict[ValueIdentity, ValueKind]
 
     @classmethod
     def reach(
@@ -103,18 +126,32 @@ class ValueScope:
         """Raises ``ValueError`` for a reached class that is not bound at
         module level under its ``__name__``. The message names the field or
         the channel."""
+        roots = tuple(roots)
+        first_party = {root.__module__ for root in roots}
         classes: dict[ValueIdentity, type] = {}
+        kinds: dict[ValueIdentity, ValueKind] = {}
         seen: set[tuple[object, bool]] = set()
 
         def visit(tp: object, where: str, *, dumped: bool) -> None:
             for inner in _annotation_types(tp):
-                kind = value_kind(inner)
-                if kind is None or (inner, dumped) in seen:
+                kind = value_kind(inner, first_party)
+                if kind is None and not _is_field_container(inner):
+                    continue
+                if (inner, dumped) in seen:
                     continue
                 seen.add((inner, dumped))
                 value = cast("type", inner)
-                if not dumped or kind == "enum":
-                    classes[_bound(value, kind, where)] = value
+                # An enum in a model dump with no identity is not an error:
+                # a read can still validate the raw value into the field.
+                if kind is not None and (
+                    not dumped
+                    or (
+                        kind == "enum"
+                        and live_value_class(value.__module__, value.__name__) is value
+                    )
+                ):
+                    identity = _bound(value, kind, where)
+                    classes[identity], kinds[identity] = value, kind
                 if kind != "enum":
                     for hint in _value_hints(value):
                         visit(hint, where, dumped=dumped or kind == "model")
@@ -126,16 +163,7 @@ class ValueScope:
             visit(tp, f"channel {channel!r}", dumped=False)
         for root in roots:
             visit(root, f"values= entry {root.__qualname__}", dumped=False)
-        return cls(classes)
-
-    @property
-    def kinds(self) -> dict[ValueIdentity, ValueKind]:
-        """The kind of each reached value class."""
-        return {
-            identity: kind
-            for identity, value in self.classes.items()
-            if (kind := value_kind(value)) is not None
-        }
+        return cls(classes, kinds)
 
     def decorated_moves(self) -> tuple[Migration, ...]:
         """One migration per reached class with ``@migrate_value_from``."""
@@ -154,19 +182,9 @@ class ValueScope:
     def unreached_siblings(self, modules: Iterable[str]) -> list[type]:
         """Each ``@migrate_value_from`` class in *modules* or in a module
         of this scope that the walk did not reach. Its move does nothing."""
-        names = {*modules, *(identity.module for identity in self.classes)}
-        reached = {id(value) for value in self.classes.values()}
-        found: dict[int, type] = {}
-        for name in names:
-            for value in vars(sys.modules.get(name, object)).values():
-                if (
-                    isinstance(value, type)
-                    and value.__module__ == name
-                    and _VALUE_SOURCES_ATTR in value.__dict__
-                    and id(value) not in reached
-                ):
-                    found[id(value)] = value
-        return list(found.values())
+        return _unreachable_migrate_from_siblings(
+            self.classes, marker=_VALUE_SOURCES_ATTR, modules=modules
+        )
 
 
 def _bound(cls: type, kind: ValueKind, where: str) -> ValueIdentity:
@@ -182,31 +200,20 @@ def _bound(cls: type, kind: ValueKind, where: str) -> ValueIdentity:
         ) from error
 
 
-def live_value_class(module: str, name: str) -> type | None:
-    """The class that *module* itself defines under *name*, or ``None``.
-
-    A class that *module* only imports does not count, because the bytes
-    that name *module* then depend on an import that nothing records.
-    """
-    try:
-        found = getattr(importlib.import_module(module), name, None)
-    except Exception:  # an import failure of any type means "not live"
-        return None
-    if isinstance(found, type) and (found.__module__, found.__name__) == (module, name):
-        return found
-    return None
-
-
 class ValueRead(NamedTuple):
-    """One recorded value identity that a read met in the stored bytes.
+    """One named client value record that a read met in the stored bytes.
 
     ``revived`` is ``False`` when LangGraph gave back anything other than
-    an instance of exactly the recorded class.
+    an instance of exactly the class that the record names. ``recorded`` is
+    ``True`` for a class of the value scope or a move target. A record of any
+    other client class is read too, so a report can name a lost value.
     """
 
     stored: tuple[str, str]
     resolved: tuple[str, str]
     revived: bool
+    recorded: bool
+    built: tuple[object, ...] = ()
 
     @property
     def touched(self) -> bool:
@@ -215,7 +222,7 @@ class ValueRead(NamedTuple):
 
 
 class _Met(NamedTuple):
-    """A recorded value record, as the bytes LangGraph can decode alone."""
+    """A named value record, as the bytes LangGraph can decode alone."""
 
     stored: tuple[str, str]
     resolved: tuple[str, str]
@@ -228,7 +235,7 @@ class ValueReader:
     """Relabels each moved value in the stored bytes, then calls LangGraph."""
 
     moves: Mapping[tuple[str, str], tuple[str, str]]
-    recorded: Mapping[tuple[str, str], type]
+    recorded: frozenset[tuple[str, str]]
     needles: tuple[bytes, ...]
 
     @classmethod
@@ -241,10 +248,9 @@ class ValueReader:
                 source: (target.__module__, target.__name__)
                 for source, target in move_table.items()
             },
-            recorded={
-                **{(i.module, i.name): c for i, c in scope.classes.items()},
-                **{(t.__module__, t.__name__): t for t in move_table.values()},
-            },
+            recorded=frozenset(
+                {*scope.classes, *map(ValueIdentity.of, move_table.values())}
+            ),
             needles=tuple({module.encode() for module, _name in move_table}),
         )
 
@@ -255,7 +261,7 @@ class ValueReader:
     ) -> Callable[[int, bytes], Any]:
         """The read of one value record. With no move and no census to
         take, this is *fallback* itself, so a read pays nothing."""
-        if not self.moves and (reads is None or not self.recorded):
+        if not self.moves and reads is None:
             return fallback
 
         def read(code: int, data: bytes) -> object:
@@ -270,7 +276,8 @@ class ValueReader:
                     ValueRead(
                         m.stored,
                         m.resolved,
-                        type(fallback(m.code, m.payload)) is self.recorded[m.resolved],
+                        _names(type(fallback(m.code, m.payload)), m.resolved),
+                        m.resolved in self.recorded,
                     )
                     for m in met
                 )
@@ -301,7 +308,11 @@ class ValueReader:
             record[0:2] = resolved
             changed = True
         payload = ormsgpack.packb(record, option=_option) if changed else data
-        if identity is not None and resolved is not None and resolved in self.recorded:
+        if (
+            identity is not None
+            and resolved is not None
+            and (resolved in self.recorded or _client_module(resolved[0]))
+        ):
             met.append(_Met(identity, resolved, code, payload))
         return payload
 
@@ -319,23 +330,5 @@ def _named_record(code: int, record: object) -> tuple[str, str] | None:
     return None
 
 
-def stored_value_identities(data: bytes) -> frozenset[tuple[str, str]]:
-    """Every ``(module, name)`` of a LangGraph value record in *data*.
-
-    Class-blind: it imports nothing and constructs nothing.
-    """
-    found: set[tuple[str, str]] = set()
-
-    def hook(code: int, payload: bytes) -> None:
-        try:
-            record = ormsgpack.unpackb(
-                payload, ext_hook=hook, option=ormsgpack.OPT_NON_STR_KEYS
-            )
-        except ormsgpack.MsgpackDecodeError:
-            return
-        identity = _named_record(code, record)
-        if identity is not None:
-            found.add(identity)
-
-    ormsgpack.unpackb(data, ext_hook=hook, option=ormsgpack.OPT_NON_STR_KEYS)
-    return frozenset(found)
+def _names(tp: type, identity: tuple[str, str]) -> bool:
+    return (tp.__module__, tp.__name__) == identity

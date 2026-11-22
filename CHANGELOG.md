@@ -14,9 +14,9 @@ A value class is now a stored identity. The baseline records it, and the serde r
 | Before | Now | Fix |
 |---|---|---|
 | The baseline was version 4 and recorded events, handlers and migrations | The baseline is version 5 and adds a cumulative `values` list. A read accepts versions 1 to 5. The first `check` after the upgrade reports `baseline-stale` | Run `baseline update` once |
-| `NamespaceAwareSerde` refused only a pydantic model in an event field that its module does not bind under `__name__` | It also refuses an enum or a dataclass, in an event field, inside another value, or in a reducer channel. The read of such a class always returned raw data | Move the class to module scope |
-| The gate ignored value classes | The gate reports `uncovered-value` and `unrevivable-value`. A strict `allowed_msgpack_modules` that omits a reached class now fails `check` | Declare the move, or add the class to the allowlist |
-| A rewrite stored a value that read back as raw data | A thread that needs a write and holds such a value is refused. A thread that needs no write stays `unchanged` | Fix the class or the allowlist, then rerun |
+| `NamespaceAwareSerde` refused only a pydantic model in an event field that its module does not bind under `__name__` | It also refuses an enum or a dataclass, in an event field, inside another value, or in a reducer channel. The read of such a class returned raw data. An enum below a pydantic model is not refused and not recorded, because the model can validate its raw value | Move the class to module scope |
+| The gate ignored value classes | The gate reports `uncovered-value` and `unrevivable-value`. A strict `allowed_msgpack_modules` that omits a reached class now fails `check`. A dataclass with an `init=False` field also fails, because LangGraph cannot rebuild it | Declare the move, add the class to the allowlist, or remove `init=False` |
+| A rewrite stored a value that read back as raw data | A thread that needs a write and holds such a recorded value is refused. A thread that needs no write stays `unchanged`, and the report names each lost value | Fix the class or the allowlist, then rerun |
 
 ### Added
 

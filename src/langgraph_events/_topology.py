@@ -1,6 +1,5 @@
 """EventTopology: the handlers, reducers and namespaces of a graph."""
 
-import contextlib
 import dataclasses
 import functools
 import inspect
@@ -739,12 +738,9 @@ class EventTopology:
         )
 
     def _channel_types(self) -> dict[str, object]:
-        """The stored type of each reducer that declares one."""
-        types_by_channel: dict[str, object] = {}
-        for name, reducer in self._reducers.items():
-            with contextlib.suppress(TypeError):
-                types_by_channel[name] = reducer.stored_type()
-        return types_by_channel
+        """The stored type of each reducer. The registry refused a reducer
+        that declares none."""
+        return {name: r.stored_type() for name, r in self._reducers.items()}
 
     def namespaces(self) -> NamespaceModel:
         """Return a :class:`NamespaceModel` — the code-derived snapshot.

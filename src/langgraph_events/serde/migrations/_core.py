@@ -27,11 +27,18 @@ from typing import (
 )
 
 from langgraph_events._event import Event, _iter_nested_events
-from langgraph_events._identity import Identity, ValueIdentity
+from langgraph_events._identity import Identity, ValueIdentity, live_value_class
 from langgraph_events._labels import distinct_labels
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+    from collections.abc import (
+        Callable,
+        Collection,
+        Iterable,
+        Iterator,
+        Mapping,
+        Sequence,
+    )
 
 PROGRAM = "python -m langgraph_events.serde.migrations"
 TARGET_PLACEHOLDER = "<module:attr of the MigrationTarget>"
@@ -952,7 +959,7 @@ def _value_move_table(moves: Sequence[MoveValue]) -> dict[tuple[str, str], type]
     for op in moves:
         source = (op.old_module, op.old_name)
         label = f"MoveValue({op.old_module}:{op.old_name!r})"
-        if isinstance(op.target, type) and issubclass(op.target, Event):
+        if issubclass(op.target, Event):
             raise ValueError(
                 f"{label}: the target {op.target.__qualname__} is an event. "
                 f"Use @migrate_from for an event."
@@ -972,11 +979,8 @@ def _value_move_table(moves: Sequence[MoveValue]) -> dict[tuple[str, str], type]
             raise ValueError(
                 f"{label}: this library owns that module. Do not move its names."
             )
-        try:
-            live = getattr(importlib.import_module(op.old_module), op.old_name, None)
-        except Exception:  # an import failure of any type means "no live class"
-            live = None
-        if isinstance(live, type) and live is not op.target:
+        live = live_value_class(*source)
+        if live is not None and live is not op.target:
             raise ValueError(
                 f"{label} names another live class, {live.__qualname__}. A move "
                 f"would hide that class on read."
@@ -2036,11 +2040,14 @@ def _collect_decorated_migrations(
 
 
 def _unreachable_migrate_from_siblings(
-    scope: dict[tuple[str, str], type],
+    scope: Collection[tuple[str, str]],
+    *,
+    marker: str = _MIGRATE_FROM_ATTR,
+    modules: Iterable[str] = (),
 ) -> list[type]:
-    """``@migrate_from``-decorated classes that live in a module *scope*
-    already reaches, but were themselves never passed to the serde.
-    Their migration is silently never collected.
+    """Classes with the decorator *marker* in a module that *scope* or
+    *modules* already reaches, that were themselves never passed to the
+    serde. Their migration is silently never collected.
 
     Scoped to modules ``scope`` already reaches, not a process-wide
     class scan. A decorated class in a module this serde was never told
@@ -2052,7 +2059,7 @@ def _unreachable_migrate_from_siblings(
     scope, in the same file as the namespace it retires an identity for,
     passed via ``namespaces=`` alone with no ``events=`` to carry it.
     """
-    reached_modules = {module_name for module_name, _qualname in scope}
+    reached_modules = {*modules, *(module for module, _name in scope)}
     seen: set[int] = set()
     found: list[type] = []
     for module_name in reached_modules:
@@ -2063,7 +2070,8 @@ def _unreachable_migrate_from_siblings(
             if (
                 isinstance(value, type)
                 and id(value) not in seen
-                and _MIGRATE_FROM_ATTR in value.__dict__
+                and marker in value.__dict__
+                and value.__module__ in reached_modules
                 and (value.__module__, value.__qualname__) not in scope
             ):
                 seen.add(id(value))

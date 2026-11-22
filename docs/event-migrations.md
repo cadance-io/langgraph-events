@@ -427,13 +427,15 @@ class Currency(StrEnum):  # the class now lives in shop.money
 
 Pass `name=` when the class was also renamed: `@migrate_value_from("shop.old_types", name="Money")`. For a composite migration, use the raw operation: `Migration((MoveValue("shop.old_types", "Money", Currency),))`.
 
-The serde finds a value class from the annotations of the event fields and the stored type of each reducer. A field typed `Any` or `object` hides the class. Then pass it in `values=` of `NamespaceAwareSerde` or `topology.serde()`.
+The serde finds a value class from the annotations of the event fields and the stored type of each reducer, also through a `TypedDict` or a `NamedTuple`. A field typed `Any` or `object` hides the class. Then pass it in `values=` of `NamespaceAwareSerde` or `topology.serde()`. A class in `values=` is recorded even when its module has the name of a standard-library module.
 
-A reached class must be bound at module level under its `__name__`, because LangGraph revives it with one `getattr` on the module. `NamespaceAwareSerde` raises `ValueError` at construction for a class nested inside a class or a function. Classes of the standard library, `pydantic`, `langchain_core`, `langgraph` and this library are not recorded.
+A reached class must be bound at module level under its `__name__`, because LangGraph revives it with one `getattr` on the module. `NamespaceAwareSerde` raises `ValueError` at construction for a class nested inside a class or a function. An enum below a pydantic model is the exception: it is not recorded, because the model can validate its raw value. Classes of the standard library, `pydantic`, `langchain_core`, `langgraph` and this library are not recorded.
 
 WARNING: `PostgresSaver` stores a bare `str`, `int`, `float` or `bool` subclass inline, with no class name. So a `StrEnum` alone in a channel reads back as a plain `str`, and no move applies to it. A `StrEnum` inside a list, a dataclass or an event keeps its identity.
 
 The rewrite refuses a thread when it must write and a recorded value reads back as raw data, because the write would store the loss. It also refuses a completed task write that holds a moved value. Resume or abandon that thread, then rerun.
+
+The rewrite stores only the latest checkpoint of each thread. WARNING: after you delete the decorator, an older checkpoint of a thread still names the old module, so a read of that checkpoint loses the value. Do not time-travel to such a checkpoint. A latest checkpoint that still holds old bytes stays `unchanged`, and the `rewrite` output names the class under `reads as raw data`. That line does not fail the command.
 
 ## What is not migrated
 

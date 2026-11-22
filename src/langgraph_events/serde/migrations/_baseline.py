@@ -1,6 +1,6 @@
 """The committed baseline: what earlier releases could have stored.
 
-Version 5. A read accepts versions 1 to 5. A write always gives version 5.
+Version 5. A read accepts versions 1 to 5. An update always gives version 5.
 :meth:`Baseline.updated` computes every value a write stores.
 """
 
@@ -211,7 +211,7 @@ class Baseline:
         )
 
     def write(self, path: Path) -> None:
-        """Write this baseline to *path* as version 5."""
+        """Write this baseline to *path* in its own version."""
         path.write_text(json.dumps(self._payload(), indent=2, sort_keys=True) + "\n")
 
     @property
@@ -225,19 +225,17 @@ class Baseline:
         return "lge-b1-" + hashlib.sha256(content.encode()).hexdigest()[:16]
 
     def _payload(self) -> dict[str, Any]:
-        """The version 5 JSON content.
+        """The JSON content. A version 4 baseline keeps its own content, so
+        a hold made against it keeps its digest.
 
         Raises:
-            TypeError: when the baseline records no code or no values. Only
-                a read of a version 1 to 4 file gives one, and no write path
-                keeps it.
+            TypeError: when the baseline records no code. Only a read of a
+                version 1 to 3 file gives one, and no write path keeps it.
         """
-        if isinstance(self.code, MigrationsUnrecorded) or isinstance(
-            self.values, ValuesUnrecorded
-        ):
-            raise TypeError("A baseline of version 1 to 4 is never written.")
+        if isinstance(self.code, MigrationsUnrecorded):
+            raise TypeError("A baseline of version 1 to 3 is never written.")
         live = self.code.live
-        return {
+        payload = {
             "version": BASELINE_VERSION,
             "events": [
                 {**_entry(i, f), "live": sorted(live[i])}
@@ -249,6 +247,11 @@ class Baseline:
                 _record_entry(record)
                 for record in sorted(self.records, key=lambda r: r.key)
             ],
+        }
+        if isinstance(self.values, ValuesUnrecorded):
+            return {**payload, "version": self.values.version}
+        return {
+            **payload,
             "values": [
                 {"kind": kind, "module": identity.module, "name": identity.name}
                 for identity, kind in sorted(self.values.items())

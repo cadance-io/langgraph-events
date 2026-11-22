@@ -10,7 +10,7 @@ import typing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, Literal
 
-from langgraph_events.serde._values import live_value_class
+from langgraph_events._identity import live_value_class
 from langgraph_events.serde.migrations._baseline import (
     Baseline,
     Hold,
@@ -268,8 +268,8 @@ class UncoveredValue:
 
 @dataclass(frozen=True)
 class UnrevivableValue:
-    """A recorded value identity whose synthesized record does not read
-    back as exactly its live class."""
+    """A recorded value identity that LangGraph cannot rebuild as its live
+    class: the allowlist blocks it, or a field is ``init=False``."""
 
     code: ClassVar[str] = "unrevivable-value"
     identity: ValueIdentity
@@ -591,12 +591,12 @@ def _value_findings(
         return []
     moves = code.serde._client_tables.value_move_table
     findings: list[UncoveredValue | UnrevivableValue] = []
-    for identity, kind in sorted(judged.values.items()):
+    for identity in sorted(judged.values):
         live = moves.get(identity) or live_value_class(*identity)
         if live is None:
             findings.append(UncoveredValue(identity))
             continue
-        failure = value_revival_failure(code.serde, identity, kind, live)
+        failure = value_revival_failure(code.serde, live)
         if failure is not None:
             findings.append(UnrevivableValue(identity, failure))
     return findings
