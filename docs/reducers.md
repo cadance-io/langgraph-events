@@ -176,7 +176,7 @@ def step(state: dict[str, int], event: Foldable) -> dict[str, int]:
     return event.fold(state)
 ```
 
-An explicit `fold=` that reads the real event union names it as a second type argument, `FoldReducer[S, E]`. mypy checks `event_type` and `fold` against `E`. `E` defaults to `Foldable`, and `S` stays the stored type that a handler annotates. Unlike `Reducer[E, T]`, the event type comes second, because `E` has a default. An event that carries no `fold` method is not `Foldable`, so its reducer must name `E`:
+An explicit `fold=` that reads the real event union names it as a second type argument, `FoldReducer[S, E]`. mypy checks `fold` against `E`, and a class or a tuple `event_type` too. mypy does not check the members of an `A | B` spec, so a tuple `(A, B)` is the form that mypy checks, as on `Reducer` and `ScalarReducer`. `E` defaults to `Foldable`, and `S` stays the stored type that a handler annotates. Unlike `Reducer[E, T]`, the event type comes second, because `E` has a default. An event that carries no `fold` method is not `Foldable`, so its reducer must name `E`:
 
 ```python
 from uuid import UUID

@@ -779,9 +779,10 @@ class FoldReducer[S, E = Foldable](BaseReducer):
 
     def _fold_events(self, state: S, events: list[Event]) -> S:
         for event in events:
-            # ``event_type`` is typed against ``E``, and ``collect`` filters
-            # by it, so every event here is an ``E``. The cast bridges the
-            # Event-typed internal stream to ``fold``'s ``E`` parameter.
+            # ``collect`` filters by ``event_type``. mypy checks a class or a
+            # tuple ``event_type`` against ``E``, but not the members of an
+            # ``A | B`` spec. The cast bridges the Event-typed internal stream
+            # to ``fold``'s ``E`` parameter.
             result = self.fold(state, cast("E", event))
             # isinstance (not ``is``) so mypy narrows the result to ``S`` in
             # the else branch — SKIP/RESET are the sole instances of their
