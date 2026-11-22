@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+A value class is now a stored identity. The baseline records it, and the serde refuses a reached class that LangGraph cannot revive.
+
+| Before | Now | Fix |
+|---|---|---|
+| The baseline was version 4 and recorded events, handlers and migrations | The baseline is version 5 and adds a cumulative `values` list. A read accepts versions 1 to 5. The first `check` after the upgrade reports `baseline-stale` | Run `baseline update` once |
+| `NamespaceAwareSerde` refused only a pydantic model in an event field that its module does not bind under `__name__` | It also refuses an enum or a dataclass, in an event field, inside another value, or in a reducer channel. The read of such a class always returned raw data | Move the class to module scope |
+| The gate ignored value classes | The gate reports `uncovered-value` and `unrevivable-value`. A strict `allowed_msgpack_modules` that omits a reached class now fails `check` | Declare the move, or add the class to the allowlist |
+| A rewrite stored a value that read back as raw data | A thread that needs a write and holds such a value is refused. A thread that needs no write stays `unchanged` | Fix the class or the allowlist, then rerun |
+
+### Added
+
+- `@migrate_value_from` and `MoveValue` declare that a value class moved. The read relabels the old identity at any depth before LangGraph's allowlist runs. LangGraph keeps every constructor. With no move declared, the fingerprint is unchanged and a read takes the same path as before.
+- `rewrite --apply` writes the new module back, also into a channel that holds a value and no event. The release rule then asks you to delete the decorator.
+- `NamespaceAwareSerde(values=...)` and `topology.serde(values=...)` name a value class behind a field typed `Any` or `object`.
+
 ## [0.56.0] - 2026-11-22
 
 ### Breaking

@@ -403,9 +403,42 @@ serde = NamespaceAwareSerde(ROLLBACK_FROM_041, namespaces=[Order])
 
 A rollback to 0.51.0 or older also loses each pending `FoldReducer` write of a later release. A pending write is the write of a task that completed in a superstep where a sibling task interrupted or failed. The later release stores the fold write under an ext code that the older serde does not know. The older serde reads it as `None`, and the fold then replaces its state with `None`, with no error. A read migration cannot fix this. Before the rollback, resume or abandon each thread paused with a pending `FoldReducer` write.
 
+## Moving a value class
+
+A value class is an enum, a dataclass or a pydantic model in an event field or in a channel. LangGraph stores it under `(module, __name__)`. When the class moves, a stored value names a module that no longer holds it, and LangGraph returns raw data with no error.
+
+Decorate the class at its new location:
+
+```python
+from enum import StrEnum
+
+from langgraph_events.serde import migrate_value_from
+
+
+@migrate_value_from("shop.old_types")  # the bytes name shop.old_types:Currency
+class Currency(StrEnum):  # the class now lives in shop.money
+    EUR = "eur"
+```
+
+1. Run `baseline update`. The baseline records each value class in `values`, and the key `move shop.old_types:Currency` in `migrations`.
+2. Deploy. The serde reads the old identity as the new one, at any depth, before LangGraph applies its allowlist. So `allowed_msgpack_modules` names the new module only.
+3. Run `rewrite --apply --expect <fingerprint>`. An aliased read is a change, so the rewrite stores the new module, also in a channel that holds a value and no event.
+4. In the next release, `survived-release` refuses the deploy until you delete the decorator.
+
+Pass `name=` when the class was also renamed: `@migrate_value_from("shop.old_types", name="Money")`. For a composite migration, use the raw operation: `Migration((MoveValue("shop.old_types", "Money", Currency),))`.
+
+The serde finds a value class from the annotations of the event fields and the stored type of each reducer. A field typed `Any` or `object` hides the class. Then pass it in `values=` of `NamespaceAwareSerde` or `topology.serde()`.
+
+A reached class must be bound at module level under its `__name__`, because LangGraph revives it with one `getattr` on the module. `NamespaceAwareSerde` raises `ValueError` at construction for a class nested inside a class or a function. Classes of the standard library, `pydantic`, `langchain_core`, `langgraph` and this library are not recorded.
+
+WARNING: `PostgresSaver` stores a bare `str`, `int`, `float` or `bool` subclass inline, with no class name. So a `StrEnum` alone in a channel reads back as a plain `str`, and no move applies to it. A `StrEnum` inside a list, a dataclass or an event keeps its identity.
+
+The rewrite refuses a thread when it must write and a recorded value reads back as raw data, because the write would store the loss. It also refuses a completed task write that holds a moved value. Resume or abandon that thread, then rerun.
+
 ## What is not migrated
 
-- **A non-Event payload**, such as a Pydantic model, a plain dataclass or a LangGraph `Interrupt` wrapper, goes through LangGraph's default serde. An event nested inside `Interrupt.value` is migrated. A Pydantic model used as an event field must live at module scope. LangGraph's serde stores it by `__name__` and revives it with `getattr` on the module. On a miss it returns a raw `dict` with no error. `NamespaceAwareSerde` raises `ValueError` at construction for a model nested inside a class or a function. A model held behind `Any` or an untyped container is not reachable from an annotation and is not checked.
+- **The fields of a non-Event payload**, such as a Pydantic model, a plain dataclass or a LangGraph `Interrupt` wrapper, go through LangGraph's default serde. A move of the class is migrated, see [Moving a value class](#moving-a-value-class). A change to its fields is not. An event nested inside `Interrupt.value` is migrated.
+- **A value class deleted with no successor** has no retirement path. Keep the class, or declare a move onto a class that replaces it.
 - **A reducer channel rename** is a LangGraph channel-routing concern. See [What changes safely](#what-changes-safely).
 - **A payload that `ormsgpack` refuses to encode** raises at the source, with no fallback. The library has no extension point for the encoder.
 - **A non-reducer channel value** has no rebuild path. Recovery is custom: read, transform, then write back through the put API of the saver.
