@@ -589,6 +589,22 @@ class Foldable(Protocol):
     def fold(self, state: Any) -> Any: ...  # noqa: ANN401 - matches the fold of any event; FoldReducer[S] holds the state type
 
 
+def _event_fold(state: Any, event: Any) -> Any:  # noqa: ANN401 - the default fold of any FoldReducer[S, E]
+    """The default ``fold`` of a :class:`FoldReducer`: the event folds itself.
+
+    ``FoldReducer`` refuses this default at construction when an event class
+    of ``event_type`` has no ``fold`` method, so ``event`` is ``Foldable``.
+    """
+    return event.fold(state)
+
+
+def _event_classes(spec: object) -> tuple[object, ...]:
+    """Each event class that *spec*, a class, a tuple or a union, names."""
+    if isinstance(spec, tuple):
+        return tuple(c for member in spec for c in _event_classes(member))
+    return _union_args(spec)
+
+
 @dataclass(frozen=True)
 class _Contributions:
     """Private wrapper for a ``FoldReducer``'s collected events.
@@ -693,12 +709,28 @@ class FoldReducer[S, E = Foldable](BaseReducer):
     event_type: type[E] | tuple[type[E], ...] | types.UnionType = field(kw_only=True)
     default_factory: Callable[[], S] = field(kw_only=True)
     fold: Callable[[S, E], S | _ResetType | SkipType] = field(
-        kw_only=True, default=lambda state, event: event.fold(state)
+        kw_only=True, default=_event_fold
     )
     namespace: type[Namespace] | None = field(kw_only=True, default=None)
     _declared: tuple[object, ...] = field(
         kw_only=True, default=(), repr=False, compare=False
     )
+
+    def __post_init__(self) -> None:
+        if self.fold is not _event_fold:
+            return
+        foldless = [
+            c
+            for c in _event_classes(self.event_type)
+            if not callable(getattr(c, "fold", None))
+        ]
+        if foldless:
+            names = ", ".join(_type_name(c) for c in foldless)
+            raise TypeError(
+                f"FoldReducer {self.name!r} uses the default fold, but {names} "
+                f"has no fold method. Give the event a fold(self, state) method, "
+                f"or pass fold= and name the event type as FoldReducer[S, E]."
+            )
 
     @property
     def reducer(self) -> Callable[[S, _Contributions | S], S]:
