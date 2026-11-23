@@ -760,6 +760,50 @@ def describe_rewrite_live_set():
 
                 assert report.threads[0].lost_values == (f"{_HERE}:Base",)
 
+    def when_a_stored_identity_is_a_re_export():
+        def _lost(saver_path: Path, record: Any) -> Any:
+            saver = MemorySaver()
+            _current_graph(saver).invoke(Started(), config=_cfg("t1"))
+            _store_blob(saver, "t1", "ref", [record])
+            store = _target(saver, saver_path / "b.json").build(saver).store
+            return store.plan_rewrite(thread_ids=["t1"]).threads[0].lost_values
+
+        def it_counts_the_exact_class_as_revived(
+            tmp_path: Path, temp_module: types.ModuleType
+        ):
+            temp_module.Priority = Priority  # type: ignore[attr-defined]
+            record = _ext(0, temp_module.__name__, "Priority", "high")
+
+            assert _lost(tmp_path, record) == ()
+
+        def when_the_read_gives_raw_data():
+            def it_stays_lost(tmp_path: Path, temp_module: types.ModuleType):
+                temp_module.Priority = Priority  # type: ignore[attr-defined]
+                record = _ext(0, temp_module.__name__, "Priority", "no")
+
+                assert _lost(tmp_path, record) == (f"{temp_module.__name__}:Priority",)
+
+        def when_the_read_gives_another_class():
+            def it_stays_lost(tmp_path: Path, temp_module: types.ModuleType):
+                class Built:
+                    pass
+
+                class Shape:
+                    def __new__(cls) -> Any:
+                        return Built()
+
+                temp_module.Shape = Shape  # type: ignore[attr-defined]
+                record = _ext(2, temp_module.__name__, "Shape", {})
+
+                assert _lost(tmp_path, record) == (f"{temp_module.__name__}:Shape",)
+
+        def when_the_name_is_bound_to_a_builtin():
+            def it_stays_lost(tmp_path: Path, temp_module: types.ModuleType):
+                temp_module.Gone = dict  # type: ignore[attr-defined]
+                record = _ext(2, temp_module.__name__, "Gone", {"a": 1})
+
+                assert _lost(tmp_path, record) == (f"{temp_module.__name__}:Gone",)
+
     def when_a_retired_move_left_old_bytes():
         def it_reads_unchanged_and_names_the_value_in_the_output(tmp_path: Path):
             saver = MemorySaver()

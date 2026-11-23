@@ -433,7 +433,7 @@ A reached class must be bound at module level under its `__name__`, because Lang
 
 WARNING: `PostgresSaver` stores a bare `str`, `int`, `float` or `bool` subclass inline, with no class name. So a `StrEnum` alone in a channel reads back as a plain `str`, and no move applies to it. A `StrEnum` inside a list, a dataclass or an event keeps its identity.
 
-The rewrite refuses a thread when it must write and a recorded value reads back as raw data, because the write would store the loss. It also refuses a completed task write that holds a moved value. Resume or abandon that thread, then rerun.
+The rewrite refuses a thread when it must write and a recorded value reads back as raw data, because the write would store the loss. WARNING: this also applies when an unrelated migration causes the write, so the [`rewrite` plan of the deploy](migration-gate.md#a-checkpoint-that-a-plan-refuses) exits 1. Fix the class or the allowlist, then rerun. A value counts as lost only when its stored name does not resolve to the exact class that the read returned, so a read through a re-export is not lost. The rewrite also refuses a completed task write that holds a moved value. Resume or abandon that thread, then rerun.
 
 The rewrite stores only the latest checkpoint of each thread. WARNING: after you delete the decorator, an older checkpoint of a thread still names the old module, so a read of that checkpoint loses the value. Do not time-travel to such a checkpoint. A latest checkpoint that still holds old bytes stays `unchanged`, and the `rewrite` output names the class under `reads as raw data`. That line does not fail the command.
 

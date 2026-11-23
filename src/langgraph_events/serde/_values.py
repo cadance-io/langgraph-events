@@ -206,7 +206,8 @@ class ValueRead(NamedTuple):
     """One named client value record that a read met in the stored bytes.
 
     ``revived`` is ``False`` when LangGraph gave back anything other than
-    an instance of exactly the class that the record names. ``recorded`` is
+    an instance of exactly the class that the stored name resolves to. A
+    re-exported name resolves to the class that it re-exports. ``recorded`` is
     ``True`` for a class of the value scope or a move target. A record of any
     other client class is read too, so a report can name a lost value.
     """
@@ -333,4 +334,13 @@ def _named_record(code: int, record: object) -> tuple[str, str] | None:
 
 
 def _names(tp: type, identity: tuple[str, str]) -> bool:
-    return (tp.__module__, tp.__name__) == identity
+    """*identity* resolves to exactly *tp*, also through a re-export.
+
+    A builtin is raw data. The check stops there, so a raw read never makes
+    a lookup from a stored name. The lookup imports nothing.
+    """
+    module, name = identity
+    return (
+        tp.__module__ != "builtins"
+        and getattr(sys.modules.get(module), name, None) is tp
+    )

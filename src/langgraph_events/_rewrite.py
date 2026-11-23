@@ -183,9 +183,10 @@ def _labels(reads: Iterable[ValueRead]) -> tuple[str, ...]:
 
 def _lost_refusal(lost: Sequence[ValueRead]) -> str | None:
     """Why a recorded value stops this write, or ``None``. A write would
-    store its raw data under no class. A class that the code no longer
-    reaches does not stop the write, so an upgrade with no move never
-    blocks on a thread that an earlier release degraded.
+    store its raw data under no class. So a thread that must be written is
+    refused when it holds a lost recorded value, even when an unrelated
+    migration causes the write. A lost value of an unrecorded class does
+    not stop the write. A thread that needs no write is not refused.
     """
     labels = _labels(read for read in lost if read.recorded)
     if not labels:
