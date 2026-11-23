@@ -405,7 +405,7 @@ A rollback to 0.51.0 or older also loses each pending `FoldReducer` write of a l
 
 ## Moving a value class
 
-A value class is an enum, a dataclass or a pydantic model in an event field or in a channel. LangGraph stores it under `(module, __name__)`. When the class moves, a stored value names a module that no longer holds it, and LangGraph returns raw data with no error.
+A value class is an enum, a dataclass, a `NamedTuple` or a pydantic model in an event field or in a channel. LangGraph stores it under `(module, __name__)`. When the class moves, a stored value names a module that no longer holds it, and LangGraph returns raw data with no error.
 
 Decorate the class at its new location:
 
@@ -429,7 +429,7 @@ Pass `name=` when the class was also renamed: `@migrate_value_from("shop.old_typ
 
 The serde finds a value class from the annotations of the event fields and the stored type of each reducer, also through a `TypedDict` or a `NamedTuple`. A field typed `Any` or `object` hides the class. Then pass it in `values=` of `NamespaceAwareSerde` or `topology.serde()`. A class in `values=` is recorded even when its module has the name of a standard-library module.
 
-A reached class must be bound at module level under its `__name__`, because LangGraph revives it with one `getattr` on the module. `NamespaceAwareSerde` raises `ValueError` at construction for a class nested inside a class or a function. An enum below a pydantic model is the exception: it is not recorded, because the model can validate its raw value. Classes of the standard library, `pydantic`, `langchain_core`, `langgraph` and this library are not recorded.
+A reached class must be bound at module level under its `__name__`, because LangGraph revives it with one `getattr` on the module. `NamespaceAwareSerde` raises `ValueError` at construction for a class nested inside a class or a function. An enum below a pydantic model is the exception: it is not recorded, because the model can validate its raw value. A `NamedTuple` below a pydantic model is not recorded either, because the model dump stores it as a plain tuple. Classes of the standard library, `pydantic`, `langchain_core`, `langgraph` and this library are not recorded.
 
 WARNING: `PostgresSaver` stores a bare `str`, `int`, `float` or `bool` subclass inline, with no class name. So a `StrEnum` alone in a channel reads back as a plain `str`, and no move applies to it. A `StrEnum` inside a list, a dataclass or an event keeps its identity.
 

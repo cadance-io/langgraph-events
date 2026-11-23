@@ -2,6 +2,8 @@
 
 import contextlib
 import dataclasses
+import sys
+import types
 import warnings
 from typing import Any, ClassVar
 
@@ -2357,6 +2359,24 @@ def describe_UnreachableMigrationWarning():
 
             with pytest.warns(UnreachableMigrationWarning, match="OrphanTombstone"):
                 NamespaceAwareSerde(namespaces=(fx.Gate,))
+
+    def when_a_reached_module_imports_the_decorated_class():
+        def it_warns_naming_the_class(monkeypatch: pytest.MonkeyPatch):
+            import _migrate_from_warning_fixture as fx
+
+            from langgraph_events.serde import UnreachableMigrationWarning
+
+            module = types.ModuleType("imports_a_tombstone")
+            module.OrphanTombstone = fx.OrphanTombstone  # type: ignore[attr-defined]
+            monkeypatch.setitem(sys.modules, module.__name__, module)
+
+            class Reached(Interrupted):
+                pass
+
+            Reached.__module__ = module.__name__
+
+            with pytest.warns(UnreachableMigrationWarning, match="OrphanTombstone"):
+                NamespaceAwareSerde(events=(Reached,))
 
     def when_the_decorated_class_is_passed_via_events():
         def it_does_not_warn():

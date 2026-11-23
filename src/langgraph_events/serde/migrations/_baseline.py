@@ -8,9 +8,9 @@ import dataclasses
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, get_args
+from typing import TYPE_CHECKING, Any
 
-from langgraph_events._identity import Identity, ValueIdentity, ValueKind
+from langgraph_events._identity import Identity, ValueIdentity
 from langgraph_events.serde.migrations._core import (
     MigrationKey,
     MigrationSet,
@@ -137,7 +137,7 @@ class Baseline:
     retired: Mapping[Identity, Fields]
     handlers: frozenset[str]
     code: CodeRecord | MigrationsUnrecorded
-    values: Mapping[ValueIdentity, ValueKind] | ValuesUnrecorded
+    values: frozenset[ValueIdentity] | ValuesUnrecorded
 
     @classmethod
     def read(cls, path: Path) -> Baseline:
@@ -147,7 +147,7 @@ class Baseline:
             ValueError: when the file has an unsupported version or shape.
         """
         if not path.exists():
-            return cls({}, {}, frozenset(), CodeRecord((), {}), {})
+            return cls({}, {}, frozenset(), CodeRecord((), {}), frozenset())
         try:
             raw: object = json.loads(path.read_text())
         except json.JSONDecodeError as error:
@@ -201,10 +201,7 @@ class Baseline:
                 else MigrationsUnrecorded(version)
             ),
             values=(
-                {
-                    ValueIdentity(e["module"], e["name"]): e["kind"]
-                    for e in raw["values"]
-                }
+                frozenset(ValueIdentity(e["module"], e["name"]) for e in raw["values"])
                 if version >= 5
                 else ValuesUnrecorded(version)
             ),
@@ -253,8 +250,8 @@ class Baseline:
         return {
             **payload,
             "values": [
-                {"kind": kind, "module": identity.module, "name": identity.name}
-                for identity, kind in sorted(self.values.items())
+                {"module": identity.module, "name": identity.name}
+                for identity in sorted(self.values)
             ],
         }
 
@@ -289,12 +286,12 @@ class Baseline:
         live = code.live_fields()
         history = self.history
         value_history = (
-            {} if isinstance(self.values, ValuesUnrecorded) else dict(self.values)
+            set() if isinstance(self.values, ValuesUnrecorded) else set(self.values)
         )
         if previous is not None and isinstance(previous.code, CodeRecord):
             history = previous.code.prune(history, code.migrations)
             for source in previous.code.moved_away(code.migrations):
-                value_history.pop(source, None)
+                value_history.discard(source)
         holds = {record.key: record.hold for record in self.records}
         return Baseline(
             events={
@@ -310,7 +307,7 @@ class Baseline:
                 ),
                 live,
             ),
-            values={**value_history, **code.serde.value_identities()},
+            values=frozenset(value_history | code.serde.value_identities()),
         )
 
     def held(self, key: MigrationKey, hold: Hold) -> Baseline:
@@ -396,10 +393,10 @@ class Baseline:
         """One line per value identity that only one baseline records."""
         if isinstance(other.values, ValuesUnrecorded):
             return []
-        mine = {} if isinstance(self.values, ValuesUnrecorded) else self.values
+        mine = frozenset() if isinstance(self.values, ValuesUnrecorded) else self.values
         return [
-            *(f"- value {i.label}" for i in sorted(mine.keys() - other.values)),
-            *(f"+ value {i.label}" for i in sorted(other.values.keys() - mine)),
+            *(f"- value {i.label}" for i in sorted(mine - other.values)),
+            *(f"+ value {i.label}" for i in sorted(other.values - mine)),
         ]
 
     @property
@@ -482,18 +479,11 @@ def _check_v4_shape(raw: dict[str, Any], path: Path) -> None:
 
 
 def _check_v5_shape(raw: dict[str, Any], path: Path) -> None:
-    """Reject a file with no ``values``, or an entry of an unknown kind."""
+    """Reject a file with no ``values``."""
     if "values" not in raw:
         raise ValueError(
             f"Baseline at {path} is version 5 but has no `values` list. Restore "
             f"the file from version control, then run `baseline update`."
-        )
-    kinds = get_args(ValueKind)
-    wrong = [e["name"] for e in raw["values"] if e["kind"] not in kinds]
-    if wrong:
-        raise ValueError(
-            f"Baseline at {path} lists values of an unknown kind: "
-            f"{', '.join(wrong)}. A kind is one of {', '.join(kinds)}."
         )
 
 

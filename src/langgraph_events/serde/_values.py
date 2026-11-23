@@ -1,7 +1,7 @@
 """The value classes a checkpoint stores by name, and the read of a moved one.
 
-LangGraph stores an enum, a dataclass or a pydantic model under
-``(module, __name__)``, and it decodes nested values with its own hook. So
+LangGraph stores an enum, a dataclass, a ``NamedTuple`` or a pydantic model
+under ``(module, __name__)``, and it decodes nested values with its own hook. So
 this module does not decode a value. It relabels the stored names in the
 bytes, at every depth, and then hands the bytes to LangGraph. LangGraph
 keeps the allowlist and every constructor.
@@ -26,7 +26,7 @@ from langgraph.checkpoint.serde.jsonplus import (
 )
 
 from langgraph_events._event import Event, Namespace
-from langgraph_events._identity import ValueIdentity, ValueKind, live_value_class
+from langgraph_events._identity import ValueIdentity, live_value_class
 from langgraph_events.serde.migrations._core import (
     _VALUE_SOURCES_ATTR,
     Migration,
@@ -64,30 +64,33 @@ def _client_module(module: str) -> bool:
     return root not in sys.stdlib_module_names and root not in _FRAMEWORK_ROOTS
 
 
-def value_kind(tp: object, first_party: Collection[str] = ()) -> ValueKind | None:
-    """The kind of the value class *tp*, or ``None`` for any other type.
+def _is_named_tuple(tp: object) -> bool:
+    return isinstance(tp, type) and issubclass(tp, tuple) and hasattr(tp, "_fields")
+
+
+def _is_value_class(tp: object, first_party: Collection[str] = ()) -> bool:
+    """*tp* is a class that LangGraph stores by name, for this client.
 
     An event, a namespace, a standard-library class and a framework class
     are not value classes of the client, unless *first_party* names the
     module of *tp*.
     """
     if not isinstance(tp, type) or issubclass(tp, (Event, Namespace)):
-        return None
+        return False
     if tp.__module__ not in first_party and not _client_module(tp.__module__):
-        return None
-    if issubclass(tp, enum.Enum):
-        return "enum"
-    if _is_pydantic_model(tp):
-        return "model"
-    return "dataclass" if dataclasses.is_dataclass(tp) else None
+        return False
+    return (
+        issubclass(tp, enum.Enum)
+        or _is_pydantic_model(tp)
+        or dataclasses.is_dataclass(tp)
+        or _is_named_tuple(tp)
+    )
 
 
 def _is_field_container(tp: object) -> bool:
-    """*tp* is a ``TypedDict`` or a ``NamedTuple``: no value class, but its
-    fields can hold one."""
-    return typing.is_typeddict(tp) or (
-        isinstance(tp, type) and issubclass(tp, tuple) and hasattr(tp, "_fields")
-    )
+    """*tp* is a ``TypedDict`` or a ``NamedTuple``, whose fields can hold a
+    value class."""
+    return typing.is_typeddict(tp) or _is_named_tuple(tp)
 
 
 def _value_hints(cls: type) -> Iterable[object]:
@@ -108,13 +111,13 @@ class ValueScope:
 
     The walk starts at the event fields, the channel types and the explicit
     *roots*. Below a dataclass, each enum, dataclass or model is its own
-    record. Below a pydantic model only an enum is, because a model dump
-    keeps an enum member and flattens the rest to a dict. A ``TypedDict`` or
-    a ``NamedTuple`` passes the walk through and is not recorded.
+    record, and so is a ``NamedTuple``. Below a pydantic model only an enum
+    is, because a model dump keeps an enum member and flattens the rest to a
+    dict or a plain tuple. A ``TypedDict`` passes the walk through and is
+    not recorded.
     """
 
     classes: Mapping[ValueIdentity, type]
-    kinds: dict[ValueIdentity, ValueKind]
 
     @classmethod
     def reach(
@@ -129,32 +132,32 @@ class ValueScope:
         roots = tuple(roots)
         first_party = {root.__module__ for root in roots}
         classes: dict[ValueIdentity, type] = {}
-        kinds: dict[ValueIdentity, ValueKind] = {}
         seen: set[tuple[object, bool]] = set()
 
         def visit(tp: object, where: str, *, dumped: bool) -> None:
             for inner in _annotation_types(tp):
-                kind = value_kind(inner, first_party)
-                if kind is None and not _is_field_container(inner):
+                stored_by_name = _is_value_class(inner, first_party)
+                if not stored_by_name and not _is_field_container(inner):
                     continue
                 if (inner, dumped) in seen:
                     continue
                 seen.add((inner, dumped))
                 value = cast("type", inner)
+                is_enum = issubclass(value, enum.Enum)
                 # An enum in a model dump with no identity is not an error:
                 # a read can still validate the raw value into the field.
-                if kind is not None and (
+                if stored_by_name and (
                     not dumped
                     or (
-                        kind == "enum"
+                        is_enum
                         and live_value_class(value.__module__, value.__name__) is value
                     )
                 ):
-                    identity = _bound(value, kind, where)
-                    classes[identity], kinds[identity] = value, kind
-                if kind != "enum":
+                    classes[_bound(value, where)] = value
+                if not is_enum:
+                    below_model = dumped or _is_pydantic_model(value)
                     for hint in _value_hints(value):
-                        visit(hint, where, dumped=dumped or kind == "model")
+                        visit(hint, where, dumped=below_model)
 
         for event in events:
             for field, tp in _field_hints(event).items():
@@ -163,7 +166,7 @@ class ValueScope:
             visit(tp, f"channel {channel!r}", dumped=False)
         for root in roots:
             visit(root, f"values= entry {root.__qualname__}", dumped=False)
-        return cls(classes, kinds)
+        return cls(classes)
 
     def decorated_moves(self) -> tuple[Migration, ...]:
         """One migration per reached class with ``@migrate_value_from``."""
@@ -187,13 +190,12 @@ class ValueScope:
         )
 
 
-def _bound(cls: type, kind: ValueKind, where: str) -> ValueIdentity:
+def _bound(cls: type, where: str) -> ValueIdentity:
     try:
         return ValueIdentity.of(cls)
     except ValueError as error:
-        label = "pydantic model" if kind == "model" else kind
         raise ValueError(
-            f"{where} is annotated with {label} {cls.__qualname__}. {error} The "
+            f"{where} is annotated with {cls.__qualname__}. {error} The "
             f"LangGraph serializer stores a value by __name__ and revives it "
             f"with getattr on the module. On a miss it returns raw data with "
             f"no error."

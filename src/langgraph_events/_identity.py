@@ -7,7 +7,7 @@ it is safe to import from any layer without a cycle.
 """
 
 import importlib
-from typing import Literal, NamedTuple
+from typing import NamedTuple
 
 
 def command_identity(cls: type) -> str:
@@ -35,10 +35,6 @@ class Identity(NamedTuple):
     def owned_by_library(self) -> bool:
         """The module is ``langgraph_events`` or one of its submodules."""
         return self.module == _LIBRARY or self.module.startswith(f"{_LIBRARY}.")
-
-
-ValueKind = Literal["enum", "dataclass", "model"]
-"""The kinds of value class that LangGraph stores by name."""
 
 
 def live_value_class(module: str, name: str) -> type | None:

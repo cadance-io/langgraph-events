@@ -6,6 +6,8 @@ behind it.
 """
 
 import dataclasses
+import inspect
+import threading
 from typing import TYPE_CHECKING, Any
 
 import ormsgpack
@@ -80,27 +82,35 @@ def value_revival_failure(serde: NamespaceAwareSerde, live: type) -> str | None:
     """Why a stored record of the value class *live* cannot revive, or
     ``None``.
 
-    LangGraph passes each ``init=False`` field to the constructor, so such a
-    dataclass never revives. The allowlist is read from LangGraph's own
-    ``msgpack_blocked`` event. The probe record holds no payload, so
-    LangGraph checks the allowlist and then stops before the constructor.
+    LangGraph passes each dataclass field to the constructor, so the
+    constructor signature must accept exactly those names. No constructor
+    runs. The allowlist is read from LangGraph's own ``msgpack_blocked``
+    event, from this thread only, because the listener registry is
+    process-global. The probe record holds no payload, so LangGraph checks
+    the allowlist and then stops before the constructor.
     """
-    if (
-        dataclasses.is_dataclass(live)
-        and not _is_pydantic_model(live)
-        and not all(f.init for f in dataclasses.fields(live))
-    ):
-        return (
-            f"LangGraph stores every field of {live.__qualname__} and passes each "
-            f"one to the constructor, and an init=False field refuses that. "
-            f"Remove init=False"
-        )
+    if dataclasses.is_dataclass(live) and not _is_pydantic_model(live):
+        stored = dict.fromkeys(f.name for f in dataclasses.fields(live))
+        try:
+            inspect.signature(live).bind(**stored)
+        except TypeError as error:
+            return (
+                f"LangGraph stores every field of {live.__qualname__} and passes "
+                f"each one to the constructor, which refuses them: {error}. Make "
+                f"the constructor accept exactly the stored fields"
+            )
     identity = (live.__module__, live.__name__)
     probe = ormsgpack.Ext(
         EXT_CONSTRUCTOR_KW_ARGS, ormsgpack.packb(identity, option=_option)
     )
     events: list[SerdeEvent] = []
-    unregister = register_serde_event_listener(events.append)
+    probing_thread = threading.get_ident()
+
+    def keep_own_event(event: SerdeEvent) -> None:
+        if threading.get_ident() == probing_thread:
+            events.append(event)
+
+    unregister = register_serde_event_listener(keep_own_event)
     try:
         serde.loads_typed(("msgpack", ormsgpack.packb(probe, option=_option)))
     finally:

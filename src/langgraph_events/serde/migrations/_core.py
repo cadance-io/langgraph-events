@@ -176,7 +176,7 @@ class SplitEvent:
 @dataclass(frozen=True)
 class MoveValue:
     """The stored value identity ``(old_module, old_name)`` now revives as
-    *target*, an enum, a dataclass or a pydantic model.
+    *target*, an enum, a dataclass, a ``NamedTuple`` or a pydantic model.
 
     The key names the stored source, as a rename key does.
     """
@@ -1491,7 +1491,8 @@ def migrate_value_from(
 ) -> Callable[[type], type]:
     """Revive a value class that a checkpoint stores under an old module.
 
-    Decorate the enum, dataclass or pydantic model at its new location::
+    Decorate the enum, dataclass, ``NamedTuple`` or pydantic model at its new
+    location::
 
         @migrate_value_from("shop.old_types")
         class Currency(StrEnum):
@@ -2071,7 +2072,9 @@ def _unreachable_migrate_from_siblings(
                 isinstance(value, type)
                 and id(value) not in seen
                 and marker in value.__dict__
-                and value.__module__ in reached_modules
+                and (
+                    marker == _MIGRATE_FROM_ATTR or value.__module__ in reached_modules
+                )
                 and (value.__module__, value.__qualname__) not in scope
             ):
                 seen.add(id(value))

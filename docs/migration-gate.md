@@ -77,7 +77,7 @@ def test_migration_gate() -> None:
 | `coverage` | `Uncovered` | A recorded identity has no live class and no migration. The finding names live classes with the same last name, a likely rename. | Add the migration, then `baseline update` |
 | `coverage` | `UncoveredValue` (`uncovered-value`) | A recorded value class is not defined at its identity, and no move names it. An import left at the old module does not cover it. | Add `@migrate_value_from`, then `baseline update` |
 | `revive` | `Unrevivable` | A synthesized payload of the recorded shape fails the real read path. | Add or fix the migration, then `baseline update` |
-| `revive` | `UnrevivableValue` (`unrevivable-value`) | LangGraph cannot rebuild a recorded value: its allowlist blocks the live class, for example because it names only the old module, or the dataclass has an `init=False` field. | Fix the class or `allowed_msgpack_modules`, then `baseline update` |
+| `revive` | `UnrevivableValue` (`unrevivable-value`) | LangGraph cannot rebuild a recorded value: its allowlist blocks the live class, for example because it names only the old module, or the dataclass constructor does not accept exactly the stored fields. | Fix the class or `allowed_msgpack_modules`, then `baseline update` |
 | `handlers` | `HandlerMissing` | A recorded handler node name has no live handler and no `@on(previously=...)` alias. | Declare the alias, then `baseline update` |
 | `release` | `SurvivedRelease` | The previous release shipped this migration, and the code still holds it. | Delete the migration, then `baseline update --previous` |
 
@@ -143,7 +143,7 @@ The removed form `python -m langgraph_events.serde.migrations <module:factory> <
   "migrations": [{"label": "rename myapp.orders:Order.ApprovalRequired"},
                  {"label": "fill myapp.orders:Order.Place.Placed[tracking]",
                   "hold": {"reason": "a paused thread refuses the rewrite", "against": "lge-b1-3f0c2a9e41b7d655"}}],
-  "values": [{"kind": "enum", "module": "myapp.money", "name": "Currency"}]
+  "values": [{"module": "myapp.money", "name": "Currency"}]
 }
 ```
 
@@ -155,7 +155,7 @@ The removed form `python -m langgraph_events.serde.migrations <module:factory> <
 | `retired` | Every identity an update dropped from `events`, with the fields last recorded for it. No `fields` key when the last record predates version 3. An identity that is live again leaves `retired`. A retired identity must revive through a migration onto a surviving class or a tombstone |
 | `handlers` | The handler node names. An update rebuilds it. `EventGraph.resumable_node_names` returns each handler node name and each `@on(previously=...)` alias |
 | `migrations` | The label of every migration of your own that the code holds, and any hold. The framework migrations of the library are not in it |
-| `values` | Each value class that a checkpoint can store by name, with its kind. Cumulative |
+| `values` | Each value class that a checkpoint can store by name. Cumulative |
 
 `events` and `retired` never share an identity. The reader raises `ValueError` on an overlap. A file of version 1, 2, 3 or 4 still loads. A file with an unknown version raises `ValueError`. The next `baseline update` writes version 5. A move that the previous release shipped and the code dropped removes its source. A file of version 1 to 4 recorded no values, so the gate judges only the classes that the code reaches.
 

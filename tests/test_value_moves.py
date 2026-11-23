@@ -4,8 +4,9 @@ import contextlib
 import enum
 import json
 import sys
+import threading
 import types
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict
 
@@ -135,6 +136,34 @@ class Derived:
     total: int = field(init=False, default=0)
 
 
+@dataclass
+class NeedsSeed:
+    count: int
+    seed: InitVar[int]
+
+
+@dataclass
+class OptionalSeed:
+    count: int
+    seed: InitVar[int] = 0
+
+
+@dataclass(init=False)
+class RenamedInit:
+    count: int
+
+    def __init__(self, amount: int) -> None:
+        self.count = amount
+
+
+@dataclass(init=False)
+class MatchingInit:
+    count: int
+
+    def __init__(self, count: int) -> None:
+        self.count = count
+
+
 class OtherSlot(TypedDict):
     other: Other
 
@@ -150,6 +179,10 @@ class RefSlot(TypedDict):
 
 class SlotCard(pydantic.BaseModel):
     slot: RefSlot
+
+
+class PairCard(pydantic.BaseModel):
+    pair: OtherPair
 
 
 class NestedEnumCard(pydantic.BaseModel):
@@ -321,6 +354,19 @@ def describe_migrate_value_from():
 
             assert serde.loads_typed(("msgpack", data)) == Box(x=1)
 
+        def it_revives_a_named_tuple(temp_module: types.ModuleType):
+            @migrate_value_from(_GONE)
+            class Point(NamedTuple):
+                x: int
+
+            _bind(temp_module, Point)
+            serde = NamespaceAwareSerde(values=[Point])
+
+            revived = serde.loads_typed(_record(2, _GONE, "Point", {"x": 1}))
+
+            assert type(revived) is Point
+            assert revived == Point(1)
+
     def when_a_decorated_sibling_is_not_reached():
         def it_warns_that_the_move_does_nothing(temp_module: types.ModuleType):
             class Reached(enum.Enum):
@@ -428,30 +474,49 @@ def describe_NamespaceAwareSerde():
         def it_records_a_class_no_annotation_reaches():
             serde = NamespaceAwareSerde(values=[Other])
 
-            assert serde.value_identities() == {(_HERE, "Other"): "enum"}
+            assert serde.value_identities() == {(_HERE, "Other")}
+
+    def when_a_typed_dict_holds_a_value():
+        def it_records_the_value_and_not_the_container():
+            serde = NamespaceAwareSerde(channel_types={"slot": OtherSlot})
+
+            assert serde.value_identities() == {(_HERE, "Other")}
+
+    def when_a_named_tuple_holds_a_value():
+        def it_records_the_named_tuple_and_the_value():
+            serde = NamespaceAwareSerde(channel_types={"pair": OtherPair})
+
+            assert serde.value_identities() == {
+                (_HERE, "OtherPair"),
+                (_HERE, "Other"),
+            }
+
+        def when_a_model_holds_the_named_tuple():
+            def it_records_only_the_model_and_the_enum():
+                serde = NamespaceAwareSerde(values=[PairCard])
+
+                assert serde.value_identities() == {
+                    (_HERE, "PairCard"),
+                    (_HERE, "Other"),
+                }
 
     def when_a_container_type_holds_a_value():
-        @pytest.mark.parametrize("container", [OtherSlot, OtherPair])
-        def it_records_the_value_and_not_the_container(container: type):
-            serde = NamespaceAwareSerde(channel_types={"slot": container})
-
-            assert serde.value_identities() == {(_HERE, "Other"): "enum"}
 
         def when_a_model_holds_the_container():
             def it_records_only_the_enums_below_the_model():
                 serde = NamespaceAwareSerde(values=[SlotCard])
 
                 assert serde.value_identities() == {
-                    (_HERE, "SlotCard"): "model",
-                    (_HERE, "Other"): "enum",
-                    (_HERE, "Priority"): "enum",
+                    (_HERE, "SlotCard"),
+                    (_HERE, "Other"),
+                    (_HERE, "Priority"),
                 }
 
     def when_a_model_holds_a_nested_enum():
         def it_records_the_model_alone():
             serde = NamespaceAwareSerde(values=[NestedEnumCard])
 
-            assert serde.value_identities() == {(_HERE, "NestedEnumCard"): "model"}
+            assert serde.value_identities() == {(_HERE, "NestedEnumCard")}
 
     def when_a_values_root_sits_in_a_module_named_like_the_standard_library():
         def it_records_the_class(monkeypatch: pytest.MonkeyPatch):
@@ -465,7 +530,7 @@ def describe_NamespaceAwareSerde():
 
             serde = NamespaceAwareSerde(values=[Local])
 
-            assert serde.value_identities() == {("tabnanny", "Local"): "enum"}
+            assert serde.value_identities() == {("tabnanny", "Local")}
 
 
 def _cfg(thread_id: str) -> dict[str, dict[str, str]]:
@@ -768,9 +833,27 @@ def _noop_moved(event: Started) -> None:
     return None
 
 
-def _add_value(path: Path, module: str, name: str, kind: str) -> None:
+class _RacedSerde(NamespaceAwareSerde):
+    """Each read waits for a read in another thread that LangGraph blocks."""
+
+    def loads_typed(self, data: tuple[str, bytes]) -> Any:
+        strict = NamespaceAwareSerde(allowed_msgpack_modules=[(_HERE, "Priority")])
+        reader = threading.Thread(
+            target=strict.loads_typed, args=(_record(0, _HERE, "Other", 1),)
+        )
+        reader.start()
+        reader.join()
+        return super().loads_typed(data)
+
+
+def _raced_graph(saver: BaseCheckpointSaver[Any]) -> EventGraph:
+    saver.serde = _RacedSerde(events=[Started], values=[Other])
+    return EventGraph([_noop_moved], checkpointer=saver)
+
+
+def _add_value(path: Path, module: str, name: str) -> None:
     raw = json.loads(path.read_text())
-    raw["values"].append({"module": module, "name": name, "kind": kind})
+    raw["values"].append({"module": module, "name": name})
     path.write_text(json.dumps(raw))
 
 
@@ -780,7 +863,7 @@ def describe_migration_gate():
             path = tmp_path / "b.json"
             target = MigrationTarget(graph=_plain_graph, baseline=path)
             update_baseline(target)
-            _add_value(path, _GONE, "Priority", "enum")
+            _add_value(path, _GONE, "Priority")
 
             report = check(target)
 
@@ -793,7 +876,7 @@ def describe_migration_gate():
                 path = tmp_path / "b.json"
                 target = MigrationTarget(graph=_gate_graph, baseline=path)
                 update_baseline(target)
-                _add_value(path, _GONE, "Moved", "enum")
+                _add_value(path, _GONE, "Moved")
 
                 assert check(target).passed
 
@@ -802,7 +885,7 @@ def describe_migration_gate():
             path = tmp_path / "b.json"
             target = MigrationTarget(graph=_plain_graph, baseline=path)
             update_baseline(target)
-            _add_value(path, _GONE, "Priority", "enum")
+            _add_value(path, _GONE, "Priority")
             module = types.ModuleType(_GONE)
             module.Priority = Priority  # type: ignore[attr-defined]
             sys.modules[_GONE] = module
@@ -818,7 +901,7 @@ def describe_migration_gate():
             path = tmp_path / "b.json"
             target = MigrationTarget(graph=_strict_old_graph, baseline=path)
             update_baseline(target)
-            _add_value(path, _GONE, "Priority", "enum")
+            _add_value(path, _GONE, "Priority")
 
             report = check(target)
 
@@ -827,7 +910,9 @@ def describe_migration_gate():
             assert found[0].code == "unrevivable-value"
 
     def when_a_healthy_class_cannot_take_a_placeholder():
-        @pytest.mark.parametrize("value", [Validated, Exported, Dated])
+        @pytest.mark.parametrize(
+            "value", [Validated, Exported, Dated, OptionalSeed, MatchingInit]
+        )
         def it_reports_no_finding(value: type, tmp_path: Path):
             path = tmp_path / "b.json"
             target = MigrationTarget(graph=_values_graph(value), baseline=path)
@@ -836,10 +921,20 @@ def describe_migration_gate():
 
             assert check(target).passed
 
-    def when_a_dataclass_has_an_init_false_field():
-        def it_reports_unrevivable_value(tmp_path: Path):
+    def when_another_thread_reads_a_blocked_value_during_the_check():
+        def it_reports_no_finding(tmp_path: Path):
             path = tmp_path / "b.json"
-            target = MigrationTarget(graph=_values_graph(Derived), baseline=path)
+            target = MigrationTarget(graph=_raced_graph, baseline=path)
+
+            update_baseline(target)
+
+            assert check(target).passed
+
+    def when_the_constructor_refuses_the_stored_fields():
+        @pytest.mark.parametrize("value", [Derived, NeedsSeed, RenamedInit])
+        def it_reports_unrevivable_value(value: type, tmp_path: Path):
+            path = tmp_path / "b.json"
+            target = MigrationTarget(graph=_values_graph(value), baseline=path)
 
             update_baseline(target)
 
@@ -861,7 +956,7 @@ def describe_migration_gate():
 
 def describe_baseline_values():
     def when_the_code_reaches_values():
-        def it_records_the_kind_of_each_value(tmp_path: Path):
+        def it_records_each_value(tmp_path: Path):
             path = tmp_path / "b.json"
 
             update_baseline(MigrationTarget(graph=_plain_graph, baseline=path))
@@ -869,9 +964,9 @@ def describe_baseline_values():
             raw = json.loads(path.read_text())
             assert raw["version"] == 5
             assert raw["values"] == [
-                {"kind": "model", "module": _HERE, "name": "Card"},
-                {"kind": "enum", "module": _HERE, "name": "Priority"},
-                {"kind": "dataclass", "module": _HERE, "name": "Ref"},
+                {"module": _HERE, "name": "Card"},
+                {"module": _HERE, "name": "Priority"},
+                {"module": _HERE, "name": "Ref"},
             ]
 
     def when_the_baseline_is_version_4():
@@ -925,7 +1020,7 @@ def describe_baseline_values():
             path = tmp_path / "b.json"
             previous = tmp_path / "previous.json"
             update_baseline(MigrationTarget(graph=_gate_graph, baseline=path))
-            _add_value(path, _GONE, "Moved", "enum")
+            _add_value(path, _GONE, "Moved")
             previous.write_text(path.read_text())
             without_move = MigrationTarget(graph=_plain_graph, baseline=path)
 

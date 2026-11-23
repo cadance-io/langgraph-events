@@ -24,7 +24,7 @@ from langgraph.types import Interrupt
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
 
-    from langgraph_events._identity import ValueIdentity, ValueKind
+    from langgraph_events._identity import ValueIdentity
     from langgraph_events.serde.migrations._core import Migration, MigrationTables
 from langgraph.checkpoint.serde.jsonplus import (
     EXT_CONSTRUCTOR_KW_ARGS,
@@ -797,9 +797,9 @@ class NamespaceAwareSerde(JsonPlusSerializer):
             for identity in self._live_identities | self._tables.rename_table.keys()
         )
 
-    def value_identities(self) -> dict[ValueIdentity, ValueKind]:
-        """Each value class this serde reaches, with its kind."""
-        return self._value_scope.kinds
+    def value_identities(self) -> frozenset[ValueIdentity]:
+        """Each value class this serde reaches."""
+        return frozenset(self._value_scope.classes)
 
     def live_fields(self) -> dict[Identity, frozenset[str]]:
         """The init fields of every live event class this serde speaks for.
