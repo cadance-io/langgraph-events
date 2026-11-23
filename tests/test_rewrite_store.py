@@ -1582,8 +1582,6 @@ def describe_rewrite_store_refusals():
                 set(),
                 set(),
                 frozenset(),
-                frozenset(),
-                written=True,
             )
 
             assert problem is not None

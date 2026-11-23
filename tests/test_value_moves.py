@@ -1,5 +1,6 @@
 """A value class is a stored identity: read, rewrite and gate after a move."""
 
+import annotationlib
 import contextlib
 import enum
 import json
@@ -773,7 +774,7 @@ def describe_rewrite_live_set():
             report = store.plan_rewrite(thread_ids=["t1"])
 
             assert [t.status for t in report.threads] == ["refused"]
-            assert f"{_HERE}:Priority reads back as raw data" in (
+            assert f"{_HERE}:Priority in channel 'ref' reads back as raw data" in (
                 report.threads[0].reason
             )
 
@@ -1226,3 +1227,514 @@ def describe_baseline_values():
                 for entry in json.loads(path.read_text())["values"]
             }
             assert (_GONE, "Moved") not in names
+
+
+class AnyCard(pydantic.BaseModel):
+    priority: Any
+    ref_id: int = 0
+
+
+class HoldsAny(IntegrationEvent):
+    moved: Priority | None = None
+    value: Any = None
+
+
+class DroppedHolder(IntegrationEvent):
+    value: Any = None
+
+
+class Trimmed(IntegrationEvent):
+    moved: Priority | None = None
+    label: str = ""
+
+
+class Replaced(IntegrationEvent):
+    moved: Priority | None = None
+    value: Any = None
+
+
+class Filled(IntegrationEvent):
+    moved: Priority | None = None
+    value: Any = None
+    note: str = ""
+
+
+class SplitSource(IntegrationEvent):
+    moved: Priority | None = None
+    value: Any = None
+
+
+class SplitTarget(IntegrationEvent):
+    moved: Priority | None = None
+
+
+class RenamedHolder(IntegrationEvent):
+    moved: Priority | None = None
+    value: Any = None
+
+
+class FilteredInPlace(IntegrationEvent):
+    moved: Priority | None = None
+    value: Any = None
+
+
+def _keep_only_high_in_place(kwargs: dict[str, Any]) -> dict[str, Any]:
+    kwargs["value"][:] = [v for v in kwargs["value"] if v is not Priority.LOW]
+    return kwargs
+
+
+_LOG_EVENTS = [
+    HoldsAny,
+    FilteredInPlace,
+    DroppedHolder,
+    Trimmed,
+    Replaced,
+    Filled,
+    SplitSource,
+    SplitTarget,
+    RenamedHolder,
+]
+_REMOVALS = [
+    Migration.transform_fields(
+        target=FilteredInPlace, transform=_keep_only_high_in_place
+    ),
+    Migration.transform_fields(
+        target=Trimmed,
+        transform=lambda kw: {k: v for k, v in kw.items() if k != "value"},
+    ),
+    Migration.transform_fields(
+        target=Replaced, transform=lambda kw: {**kw, "value": "replaced"}
+    ),
+    Migration.add_field(target=Filled, field="note", default="filled"),
+    Migration.split_event(
+        source=SplitSource,
+        select=lambda kw: (SplitTarget, {"moved": kw.get("moved")}),
+        targets=[SplitTarget],
+    ),
+    Migration.rename(old_module=_HERE, old_qualname="OldHolder", to=RenamedHolder),
+]
+_LOST_MEMBER = _ext(0, _HERE, "Priority", "no")
+_DEAD_MODULE = "dead_value_module"
+
+
+@on(HoldsAny)
+def _on_any(event: HoldsAny) -> None:
+    return None
+
+
+def _moved() -> ormsgpack.Ext:
+    return _ext(0, _GONE, "Priority", "high")
+
+
+def _event(cls: type, qualname: str | None = None, **fields: Any) -> ormsgpack.Ext:
+    record = [cls.__module__, qualname or cls.__qualname__, fields]
+    return ormsgpack.Ext(100, ormsgpack.packb(record, option=_option))
+
+
+def _dumped(value: object) -> ormsgpack.Ext:
+    """*value* as the record that a real write stores."""
+    data = NamespaceAwareSerde().dumps_typed(value)[1]
+    return ormsgpack.unpackb(
+        data,
+        ext_hook=ormsgpack.Ext,
+        option=ormsgpack.OPT_NON_STR_KEYS,
+    )
+
+
+def _log_graph(allowed: Any = None) -> Any:
+    def graph(saver: BaseCheckpointSaver[Any]) -> EventGraph:
+        limit = {} if allowed is None else {"allowed_msgpack_modules": allowed}
+        saver.serde = NamespaceAwareSerde(
+            [*_MOVES, *_REMOVALS], events=_LOG_EVENTS, **limit
+        )
+        return EventGraph([_on_any], checkpointer=saver)
+
+    return graph
+
+
+def _log_store(saver: MemorySaver, tmp_path: Path, allowed: Any = None) -> Any:
+    target = MigrationTarget(graph=_log_graph(allowed), baseline=tmp_path / "b.json")
+    return target.build(saver).store
+
+
+def _log_saver(*log: ormsgpack.Ext) -> MemorySaver:
+    saver = MemorySaver()
+    _log_graph()(saver).invoke(HoldsAny(), config=_cfg("t1"))
+    _store_blob(saver, "t1", "events", list(log))
+    return saver
+
+
+def _value_thread(tmp_path: Path, value: ormsgpack.Ext, allowed: Any = None) -> Any:
+    saver = _log_saver(_event(HoldsAny, moved=_moved(), value=value))
+    return (
+        _log_store(saver, tmp_path, allowed).plan_rewrite(thread_ids=["t1"]).threads[0]
+    )
+
+
+def describe_a_rewrite_that_would_remove_a_stored_class():
+    def when_the_class_stays_in_the_new_bytes():
+        def it_plans_a_healthy_value(tmp_path: Path):
+            thread = _value_thread(tmp_path, _ext(0, _HERE, "Priority", "low"))
+
+            assert (thread.status, thread.lost_values) == ("rewrite", ())
+
+        def it_plans_a_declared_move(tmp_path: Path):
+            thread = _value_thread(tmp_path, _ext(1, _GONE, "Ref", [1, _moved()]))
+
+            assert thread.status == "rewrite"
+
+        def it_plans_a_re_export_that_a_complete_allowlist_admits(
+            tmp_path: Path, temp_module: types.ModuleType
+        ):
+            temp_module.Other = Other  # type: ignore[attr-defined]
+            allowed = [*_STRICT, (temp_module.__name__, "Other"), (_HERE, "Other")]
+            record = _ext(0, temp_module.__name__, "Other", 1)
+
+            assert _value_thread(tmp_path, record, allowed).status == "rewrite"
+
+        def it_plans_a_module_whose_second_getattr_raises_import_error(
+            tmp_path: Path, temp_module: types.ModuleType
+        ):
+            lookups = iter([Other])
+
+            def first_lookup_only(name: str) -> object:
+                try:
+                    return next(lookups)
+                except StopIteration:
+                    raise ImportError(name) from None
+
+            temp_module.__getattr__ = first_lookup_only  # type: ignore[method-assign]
+            record = _ext(0, temp_module.__name__, "Other", 1)
+
+            assert _value_thread(tmp_path, record).status == "rewrite"
+
+        def it_does_not_flag_a_framework_re_export(tmp_path: Path):
+            from ag_ui.core import Context
+
+            live = (Context.__module__, "Context")
+            kwargs = {"description": "d", "value": "v"}
+            assert live != ("ag_ui.core", "Context")
+            record = _ext(5, "ag_ui.core", "Context", kwargs)
+
+            thread = _value_thread(tmp_path, record)
+
+            assert (thread.status, thread.lost_values) == ("rewrite", ())
+
+        def it_plans_a_nested_enum_that_its_model_restores(tmp_path: Path):
+            record = _dumped(Card(priority=Priority.HIGH, ref_id=1))
+            saver = _log_saver(_event(RenamedHolder, "OldHolder", value=record))
+            store = _log_store(saver, tmp_path, [(_HERE, "Card")])
+
+            thread = store.plan_rewrite(thread_ids=["t1"]).threads[0]
+
+            assert (thread.status, thread.lost_values) == ("rewrite", ())
+
+    def when_the_new_bytes_do_not_revive():
+        def it_refuses_a_re_export_only_allowlist(
+            tmp_path: Path, temp_module: types.ModuleType
+        ):
+            temp_module.Other = Other  # type: ignore[attr-defined]
+            allowed = [*_STRICT, (temp_module.__name__, "Other")]
+            record = _ext(0, temp_module.__name__, "Other", 1)
+
+            thread = _value_thread(tmp_path, record, allowed)
+
+            assert thread.status == "refused"
+            assert f"{_HERE}:Other" in thread.reason
+
+    def when_the_class_leaves_the_new_bytes():
+        def it_refuses_a_model_whose_enum_the_allowlist_omits(tmp_path: Path):
+            record = _dumped(AnyCard(priority=Priority.HIGH))
+            saver = _log_saver(_event(RenamedHolder, "OldHolder", value=record))
+            store = _log_store(saver, tmp_path, [(_HERE, "AnyCard")])
+
+            thread = store.plan_rewrite(thread_ids=["t1"]).threads[0]
+
+            assert thread.status == "refused"
+            assert f"{_HERE}:Priority" in thread.reason
+
+        def it_refuses_a_deleted_member(tmp_path: Path):
+            assert _value_thread(tmp_path, _LOST_MEMBER).status == "refused"
+
+        def it_refuses_a_dataclass_that_lost_a_field(tmp_path: Path):
+            record = _ext(2, _HERE, "Base", {"a": 1, "b": 2, "gone": 3})
+
+            assert _value_thread(tmp_path, record).status == "refused"
+
+        def it_refuses_an_old_unrecorded_value(tmp_path: Path):
+            record = _ext(0, _DEAD_MODULE, "Tone", "aa")
+
+            thread = _value_thread(tmp_path, record)
+
+            assert thread.status == "refused"
+            assert f"{_DEAD_MODULE}:Tone" in thread.reason
+
+        def it_counts_records_per_name(tmp_path: Path, temp_module: types.ModuleType):
+            temp_module.Other = Other  # type: ignore[attr-defined]
+            value = [
+                _ext(0, temp_module.__name__, "Other", 1),
+                _ext(0, _DEAD_MODULE, "Other", 1),
+            ]
+            saver = _log_saver(_event(HoldsAny, moved=_moved(), value=value))
+
+            thread = _log_store(saver, tmp_path).plan_rewrite(thread_ids=["t1"])
+
+            assert thread.threads[0].status == "refused"
+            assert f"{_DEAD_MODULE}:Other" in thread.threads[0].reason
+
+        def it_keeps_the_bytes_and_a_corrected_allowlist_revives_the_value(
+            tmp_path: Path,
+        ):
+            record = _dumped(AnyCard(priority=Priority.HIGH))
+            saver = _log_saver(_event(RenamedHolder, "OldHolder", value=record))
+            before = _memory_blob(saver, "t1", "events")
+
+            report = _log_store(saver, tmp_path, [(_HERE, "AnyCard")]).rewrite_store(
+                thread_ids=["t1"]
+            )
+
+            assert [t.status for t in report.threads] == ["refused"]
+            assert _memory_blob(saver, "t1", "events") == before
+            allowed = [(_HERE, "AnyCard"), (_HERE, "Priority")]
+            _log_store(saver, tmp_path, allowed).rewrite_store(thread_ids=["t1"])
+            tup = saver.get_tuple(_cfg("t1"))
+            assert tup is not None
+            stored = tup.checkpoint["channel_values"]["events"][0]
+            assert stored.value == AnyCard(priority=Priority.HIGH)
+
+    def when_an_unwritten_channel_holds_the_lost_class():
+        def it_plans_the_write_and_names_the_class(tmp_path: Path):
+            saver = MemorySaver()
+            reducers = [_reducer(Ref, Priority), _note_reducer()]
+            saver.serde = EventTopology([_choose], reducers=reducers).serde(_MOVES)
+            EventGraph([_choose], reducers=reducers, checkpointer=saver).invoke(
+                Started(), config=_cfg("t1")
+            )
+            _store_blob(saver, "t1", "ref", [_moved()])
+            _store_blob(saver, "t1", "note", [_ext(0, _DEAD_MODULE, "Tone", "aa")])
+
+            def graph(store_saver: BaseCheckpointSaver[Any]) -> EventGraph:
+                store_saver.serde = EventTopology([_choose], reducers=reducers).serde(
+                    _MOVES
+                )
+                return EventGraph(
+                    [_choose], reducers=reducers, checkpointer=store_saver
+                )
+
+            target = MigrationTarget(graph=graph, baseline=tmp_path / "b.json")
+            thread = (
+                target.build(saver).store.plan_rewrite(thread_ids=["t1"]).threads[0]
+            )
+
+            assert thread.status == "rewrite"
+            assert thread.lost_values == (f"{_DEAD_MODULE}:Tone",)
+
+    def when_a_pending_interrupt_holds_the_value():
+        def _paused(tmp_path: Path, *held: ormsgpack.Ext) -> Any:
+            saver = MemorySaver()
+            saver.serde = NamespaceAwareSerde(_MOVES, events=[Started, AskPriority])
+            _ask.priority = Priority.HIGH  # type: ignore[attr-defined]
+            EventGraph([_ask], checkpointer=saver).invoke(Started(), config=_cfg("t1"))
+            tup = saver.get_tuple(_cfg("t1"))
+            assert tup is not None
+            writes = saver.writes[
+                ("t1", "", tup.config["configurable"]["checkpoint_id"])
+            ]
+            blob = ("msgpack", ormsgpack.packb([_moved(), *held], option=_option))
+            for key, (task, channel, _blob, path) in list(writes.items()):
+                if channel == "__interrupt__":
+                    writes[key] = (task, channel, blob, path)
+            target = MigrationTarget(graph=_ask_graph, baseline=tmp_path / "b.json")
+            return target.build(saver).store.plan_rewrite(thread_ids=["t1"]).threads[0]
+
+        def it_refuses_a_deleted_member(tmp_path: Path):
+            thread = _paused(tmp_path, _LOST_MEMBER)
+
+            assert thread.status == "refused"
+            assert "the pending __interrupt__ write" in thread.reason
+
+        def it_refuses_a_deleted_member_on_a_one_blob_saver(tmp_path: Path):
+            from langgraph.checkpoint.sqlite import SqliteSaver
+
+            with SqliteSaver.from_conn_string(":memory:") as saver:
+                saver.serde = NamespaceAwareSerde(_MOVES, events=[Started, AskPriority])
+                _ask.priority = Priority.HIGH  # type: ignore[attr-defined]
+                EventGraph([_ask], checkpointer=saver).invoke(
+                    Started(), config=_cfg("t1")
+                )
+                blob = ormsgpack.packb([_moved(), _LOST_MEMBER], option=_option)
+                saver.conn.execute(
+                    "UPDATE writes SET type = 'msgpack', value = ? "
+                    "WHERE channel = '__interrupt__'",
+                    (blob,),
+                )
+                target = MigrationTarget(graph=_ask_graph, baseline=tmp_path / "b.json")
+
+                report = target.build(saver).store.plan_rewrite(thread_ids=["t1"])
+
+            assert report.threads[0].status == "refused"
+            assert "the pending __interrupt__ write" in report.threads[0].reason
+
+        def it_plans_a_healthy_value(tmp_path: Path):
+            thread = _paused(tmp_path, _ext(0, _HERE, "Priority", "low"))
+
+            assert thread.status == "rewrite"
+
+    def when_a_declared_migration_removes_the_value():
+        def it_plans_a_value_held_only_by_a_dropped_event(tmp_path: Path):
+            saver = _log_saver(
+                _event(HoldsAny, moved=_moved()),
+                _event(DroppedHolder, value=_LOST_MEMBER),
+            )
+
+            thread = (
+                _log_store(saver, tmp_path)
+                .plan_rewrite(thread_ids=["t1"], drop=[DroppedHolder])
+                .threads[0]
+            )
+
+            assert thread.status == "rewrite"
+
+        @pytest.mark.parametrize(
+            ("cls", "qualname"),
+            [
+                (Trimmed, None),
+                (Replaced, None),
+                (SplitSource, None),
+            ],
+        )
+        def it_plans_a_field_that_a_migration_drops_or_replaces(
+            tmp_path: Path, cls: type, qualname: str | None
+        ):
+            saver = _log_saver(
+                _event(cls, qualname, moved=_moved(), value=_LOST_MEMBER)
+            )
+
+            thread = _log_store(saver, tmp_path).plan_rewrite(thread_ids=["t1"])
+
+            assert thread.threads[0].status == "rewrite"
+
+        def it_plans_a_healthy_value_through_a_fill(tmp_path: Path):
+            record = _ext(0, _HERE, "Priority", "low")
+            saver = _log_saver(_event(Filled, moved=_moved(), value=record))
+
+            thread = _log_store(saver, tmp_path).plan_rewrite(thread_ids=["t1"])
+
+            assert thread.threads[0].status == "rewrite"
+
+        def it_plans_a_healthy_value_through_a_rename(tmp_path: Path):
+            record = _ext(0, _HERE, "Priority", "low")
+            saver = _log_saver(
+                _event(RenamedHolder, "OldHolder", moved=_moved(), value=record)
+            )
+
+            thread = _log_store(saver, tmp_path).plan_rewrite(thread_ids=["t1"])
+
+            assert thread.threads[0].status == "rewrite"
+
+        def it_refuses_a_nested_drop_beside_a_lost_value_of_the_same_class(
+            tmp_path: Path,
+        ):
+            inner = _event(DroppedHolder, value=_LOST_MEMBER)
+            saver = _log_saver(
+                _event(HoldsAny, moved=_moved(), value=_LOST_MEMBER),
+                _event(DroppedHolder, value=[inner]),
+            )
+
+            thread = (
+                _log_store(saver, tmp_path)
+                .plan_rewrite(thread_ids=["t1"], drop=[DroppedHolder])
+                .threads[0]
+            )
+
+            assert thread.status == "refused"
+            assert f"{_HERE}:Priority" in thread.reason
+
+        def it_plans_a_nested_drop_alone(tmp_path: Path):
+            inner = _event(DroppedHolder, value=_LOST_MEMBER)
+            saver = _log_saver(
+                _event(HoldsAny, moved=_moved()),
+                _event(DroppedHolder, value=[inner]),
+            )
+
+            thread = (
+                _log_store(saver, tmp_path)
+                .plan_rewrite(thread_ids=["t1"], drop=[DroppedHolder])
+                .threads[0]
+            )
+
+            assert thread.status == "rewrite"
+
+        def it_plans_a_value_that_a_transform_removes_in_place(tmp_path: Path):
+            held = [_ext(0, _HERE, "Priority", "low"), _moved()]
+            saver = _log_saver(_event(FilteredInPlace, moved=_moved(), value=held))
+
+            thread = _log_store(saver, tmp_path).plan_rewrite(thread_ids=["t1"])
+
+            assert thread.threads[0].status == "rewrite"
+
+        def it_refuses_a_loss_that_an_in_place_transform_keeps(tmp_path: Path):
+            held = [_ext(0, _HERE, "Priority", "low"), _LOST_MEMBER]
+            saver = _log_saver(_event(FilteredInPlace, moved=_moved(), value=held))
+
+            thread = _log_store(saver, tmp_path).plan_rewrite(thread_ids=["t1"])
+
+            assert thread.threads[0].status == "refused"
+
+        def it_refuses_a_loss_in_a_field_that_the_migration_kept(tmp_path: Path):
+            saver = _log_saver(
+                _event(RenamedHolder, "OldHolder", moved=_moved(), value=_LOST_MEMBER)
+            )
+
+            thread = _log_store(saver, tmp_path).plan_rewrite(thread_ids=["t1"])
+
+            assert thread.threads[0].status == "refused"
+
+    def when_the_thread_has_no_migration():
+        def it_stays_unchanged(tmp_path: Path):
+            saver = _log_saver(_event(HoldsAny, value=_LOST_MEMBER))
+
+            thread = _log_store(saver, tmp_path).plan_rewrite(thread_ids=["t1"])
+
+            assert thread.threads[0].status == "unchanged"
+            assert thread.threads[0].lost_values == (f"{_HERE}:Priority",)
+
+
+type _ForwardOnly = "Later" | None  # noqa: F821
+type _Dense0 = list[_Dense1] | list[_Dense2] | list[_Dense3] | list[_Dense4]
+type _Dense1 = list[_Dense0] | list[_Dense2] | list[_Dense3] | list[_Dense4]
+type _Dense2 = list[_Dense0] | list[_Dense1] | list[_Dense3] | list[_Dense4]
+type _Dense3 = list[_Dense0] | list[_Dense1] | list[_Dense2] | list[_Dense4]
+type _Dense4 = list[_Dense0] | list[_Dense1] | list[_Dense2] | list[_Dense3]
+
+
+class HoldsOpaqueAlias(IntegrationEvent):
+    op: _ForwardOnly = None
+
+
+class HoldsDenseAlias(IntegrationEvent):
+    tree: _Dense0 | None = None
+
+
+def describe_a_type_alias_in_a_field():
+    def when_its_value_cannot_be_evaluated():
+        def it_builds_the_serde():
+            serde = NamespaceAwareSerde(events=[HoldsOpaqueAlias])
+
+            assert serde.value_identities() == frozenset()
+
+    def when_a_recursive_group_is_dense():
+        def it_visits_each_alias_once(monkeypatch: pytest.MonkeyPatch):
+            calls = 0
+            real = annotationlib.call_evaluate_function
+
+            def counted(*args: Any, **kwargs: Any) -> Any:
+                nonlocal calls
+                calls += 1
+                return real(*args, **kwargs)
+
+            monkeypatch.setattr(annotationlib, "call_evaluate_function", counted)
+
+            NamespaceAwareSerde(events=[HoldsDenseAlias])
+
+            assert calls <= 5

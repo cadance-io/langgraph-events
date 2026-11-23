@@ -4011,7 +4011,7 @@ def describe_record_reads():
             serde.loads_typed(synthesize_legacy_payload(mod, "_Rec.Old", {}))
             serde.loads_typed(synthesize_legacy_payload(mod, "_Rec.Old", {}))
 
-        assert reads == [
+        assert [read[:4] for read in reads] == [
             ((mod, "_Rec.Old"), (mod, "_Rec.New"), True, ()),
             ((mod, "_Rec.Old"), (mod, "_Rec.New"), True, ()),
         ]
@@ -4023,7 +4023,7 @@ def describe_record_reads():
         with serde._record_reads() as reads:
             serde.loads_typed(serde.dumps_typed(_RecSameIdentity()))
 
-        assert reads == [
+        assert [read[:4] for read in reads] == [
             (
                 (mod, "_RecSameIdentity"),
                 (mod, "_RecSameIdentity"),
@@ -4042,7 +4042,7 @@ def describe_record_reads():
         with serde._record_reads() as reads:
             serde.loads_typed(serde.dumps_typed(_RecIdentityTransform()))
 
-        assert reads == [
+        assert [read[:4] for read in reads] == [
             ((mod, "_RecIdentityTransform"), (mod, "_RecIdentityTransform"), False, ())
         ]
 
@@ -4054,7 +4054,7 @@ def describe_record_reads():
             serde.loads_typed(synthesize_legacy_payload(mod, "_RecFilled", {}))
             serde.loads_typed(serde.dumps_typed(_RecFilled(flag=False)))
 
-        assert reads == [
+        assert [read[:4] for read in reads] == [
             ((mod, "_RecFilled"), (mod, "_RecFilled"), True, (True,)),
             ((mod, "_RecFilled"), (mod, "_RecFilled"), False, ()),
         ]
@@ -4067,7 +4067,7 @@ def describe_record_reads():
             serde.loads_typed(synthesize_legacy_payload(mod, "_RecGone", {}))
 
         assert [u.qualname for u in unresolved] == ["_RecGone"]
-        assert reads == []
+        assert [read[:4] for read in reads] == []
 
     def it_records_an_untouched_class_as_untouched():
         serde = NamespaceAwareSerde(events=(_RecUntouched,))
@@ -4076,7 +4076,9 @@ def describe_record_reads():
         with serde._record_reads() as reads:
             serde.loads_typed(serde.dumps_typed([_RecUntouched()]))
 
-        assert reads == [((mod, "_RecUntouched"), (mod, "_RecUntouched"), False, ())]
+        assert [read[:4] for read in reads] == [
+            ((mod, "_RecUntouched"), (mod, "_RecUntouched"), False, ())
+        ]
 
     def it_stays_off_outside_the_block():
         serde = NamespaceAwareSerde(namespaces=[_Rec])

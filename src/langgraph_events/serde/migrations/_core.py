@@ -7,6 +7,7 @@ prior library versions — this is a read-side affordance only. See #70.
 """
 
 import annotationlib
+import contextlib
 import dataclasses
 import enum
 import functools
@@ -1810,13 +1811,15 @@ def _serde_event_classes(
 
 
 def _annotation_types(
-    tp: object, followed: frozenset[object] = frozenset()
+    tp: object, followed: set[object] | None = None
 ) -> Iterator[object]:
     """*tp* and every type under it, depth first: each type argument, the
     class of a generic alias, the value of a type alias, and the enum of a
-    ``Literal`` member. *followed* stops a recursive type alias. A name that
-    only ``TYPE_CHECKING`` imports stays an unresolved reference.
+    ``Literal`` member. *followed* holds each alias of this walk, so each
+    alias is evaluated once. A name that only ``TYPE_CHECKING`` imports stays
+    an unresolved reference. An alias that cannot be evaluated is opaque.
     """
+    followed = set() if followed is None else followed
     yield tp
     origin = typing.get_origin(tp)
     if origin is typing.Literal:
@@ -1826,10 +1829,12 @@ def _annotation_types(
     alias = origin if isinstance(origin, typing.TypeAliasType) else tp
     if isinstance(alias, typing.TypeAliasType):
         if alias not in followed:
-            value = annotationlib.call_evaluate_function(
-                alias.evaluate_value, annotationlib.Format.FORWARDREF
-            )
-            yield from _annotation_types(value, followed | {alias})
+            followed.add(alias)
+            with contextlib.suppress(NameError, TypeError, AttributeError):
+                value = annotationlib.call_evaluate_function(
+                    alias.evaluate_value, annotationlib.Format.FORWARDREF
+                )
+                yield from _annotation_types(value, followed)
     elif isinstance(origin, type):
         yield origin
     for arg in typing.get_args(tp):

@@ -8,10 +8,12 @@ keeps the allowlist and every constructor.
 """
 
 import annotationlib
+import contextlib
 import dataclasses
 import enum
 import sys
 import typing
+from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
@@ -203,34 +205,16 @@ def _bound(cls: type, where: str) -> ValueIdentity:
 
 
 class ValueRead(NamedTuple):
-    """One named client value record that a read met in the stored bytes.
-
-    ``revived`` is ``False`` when LangGraph gave back anything other than
-    an instance of exactly the class that the stored name resolves to. A
-    re-exported name resolves to the class that it re-exports. ``recorded`` is
-    ``True`` for a class of the value scope or a move target. A record of any
-    other client class is read too, so a report can name a lost value.
-    """
+    """One named client value record that a read met in the stored bytes."""
 
     stored: tuple[str, str]
     resolved: tuple[str, str]
-    revived: bool
-    recorded: bool
     built: tuple[object, ...] = ()
 
     @property
     def touched(self) -> bool:
         """A rewrite stores this value under another identity."""
         return self.stored != self.resolved
-
-
-class _Met(NamedTuple):
-    """A named value record, as the bytes LangGraph can decode alone."""
-
-    stored: tuple[str, str]
-    resolved: tuple[str, str]
-    code: int
-    payload: bytes
 
 
 @dataclass(frozen=True)
@@ -262,33 +246,41 @@ class ValueReader:
         fallback: Callable[[int, bytes], Any],
         reads: list[Any] | None,
     ) -> Callable[[int, bytes], Any]:
-        """The read of one value record. With no move and no census to
-        take, this is *fallback* itself, so a read pays nothing."""
+        """The read of one value record. With no move and no read to
+        record, this is *fallback* itself, so a read pays nothing."""
         if not self.moves and reads is None:
             return fallback
 
         def read(code: int, data: bytes) -> object:
             if reads is None and not any(needle in data for needle in self.needles):
                 return fallback(code, data)
-            met: list[_Met] = []
+            met: list[ValueRead] = []
             relabelled = self._relabel(code, data, met)
             if reads is not None:
-                # Each record is decoded alone and judged on its exact type,
-                # so a subclass instance cannot stand in for a lost record.
-                reads.extend(
-                    ValueRead(
-                        m.stored,
-                        m.resolved,
-                        _names(type(fallback(m.code, m.payload)), m.resolved),
-                        m.resolved in self.recorded,
-                    )
-                    for m in met
-                )
+                reads.extend(met)
             return fallback(code, relabelled)
 
         return read
 
-    def _relabel(self, code: int, data: bytes, met: list[_Met]) -> bytes:
+    def names(self, data: bytes) -> Counter[tuple[str, str]]:
+        """The live name of each value record in *data*, counted per name."""
+        met: list[ValueRead] = []
+        self._relabel(-1, data, met)
+        return Counter(read.resolved for read in met)
+
+    def nested_records(self, data: bytes) -> Counter[bytes]:
+        """The payload of each extension record below *data*, per payload."""
+        found: Counter[bytes] = Counter()
+
+        def nested(_code: int, payload: bytes) -> None:
+            found[payload] += 1
+            found.update(self.nested_records(payload))
+
+        with contextlib.suppress(ormsgpack.MsgpackDecodeError):
+            ormsgpack.unpackb(data, ext_hook=nested, option=ormsgpack.OPT_NON_STR_KEYS)
+        return found
+
+    def _relabel(self, code: int, data: bytes, met: list[ValueRead]) -> bytes:
         """*data* with each moved name replaced. It is the same object when
         no name inside it moved, so an unmoved record is never repacked."""
         changed = False
@@ -316,7 +308,7 @@ class ValueReader:
             and resolved is not None
             and (resolved in self.recorded or _client_module(resolved[0]))
         ):
-            met.append(_Met(identity, resolved, code, payload))
+            met.append(ValueRead(identity, resolved))
         return payload
 
 
@@ -331,17 +323,3 @@ def _named_record(code: int, record: object) -> tuple[str, str] | None:
     ):
         return record[0], record[1]
     return None
-
-
-def _names(tp: type, identity: tuple[str, str]) -> bool:
-    """*identity* resolves to exactly *tp*, also through a re-export.
-
-    A builtin is raw data. The check stops there, so a raw read never makes
-    a lookup from a stored name. The lookup does not import *module*, but a
-    ``__getattr__`` of an imported module can run an import.
-    """
-    module, name = identity
-    return (
-        tp.__module__ != "builtins"
-        and getattr(sys.modules.get(module), name, None) is tp
-    )

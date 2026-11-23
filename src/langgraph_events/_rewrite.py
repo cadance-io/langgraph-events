@@ -10,6 +10,7 @@ write, drop the stored events the caller named, and build the
 checkpoint the graph will store. It never touches a store.
 """
 
+from collections import Counter
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -29,7 +30,6 @@ if TYPE_CHECKING:
         StoredRead,
         UnrevivedIdentity,
     )
-    from langgraph_events.serde._values import ValueRead
 
 _INTERRUPT_CHANNEL = "__interrupt__"
 """The pending-write channel the rewrite writes back in place."""
@@ -57,8 +57,9 @@ class ThreadRewrite:
     table rewrote, as ``"module:qualname"`` strings, deduped in read
     order. ``dropped`` counts the stored events ``drop`` removed, per
     identity. ``reason`` says what to do when the status is
-    ``"refused"``. ``lost_values`` names each client value class whose
-    stored record reads as raw data. It does not change the status.
+    ``"refused"``. ``lost_values`` names each client value class that a
+    re-encode of its stored value removes. A thread that history refuses
+    is not judged, so its ``lost_values`` is empty.
     """
 
     thread_id: str
@@ -177,24 +178,87 @@ def _migrated_pairs(reads: Sequence[StoredRead]) -> tuple[tuple[str, str], ...]:
     return tuple(pairs)
 
 
-def _labels(reads: Iterable[ValueRead]) -> tuple[str, ...]:
-    return tuple(dict.fromkeys(Identity(*read.resolved).label for read in reads))
+def _written_names(
+    serde: NamespaceAwareSerde, value: object
+) -> tuple[object, Counter[tuple[str, str]]]:
+    """*value* after one write and one read, and the names the write stores."""
+    data = serde.dumps_typed(value)
+    names = serde._value_reader.names(data[1]) if data[0] == "msgpack" else Counter()
+    return serde.loads_typed(data), names
 
 
-def _lost_refusal(lost: Sequence[ValueRead]) -> str | None:
-    """Why a recorded value stops this write, or ``None``. A write would
-    store its raw data under no class. So a thread that must be written is
-    refused when it holds a lost recorded value, even when an unrelated
-    migration causes the write. A lost value of an unrecorded class does
-    not stop the write. A thread that needs no write is not refused.
+def _lost_names(
+    serde: NamespaceAwareSerde,
+    value: object,
+    records: Sequence[StoredRead],
+    drop_identities: set[tuple[str, str]],
+) -> tuple[str, ...]:
+    """Each class name that a write of *value* removes from its stored bytes.
+
+    A name that a ``drop`` or a migration removes on purpose does not count.
+    A name that returns under another module is a re-export, matched per
+    ``__name__`` and per record. The second read proves that the allowlist
+    admits the new name. A value that cannot encode or read keeps no name.
     """
-    labels = _labels(read for read in lost if read.recorded)
-    if not labels:
-        return None
-    return (
-        f"{', '.join(labels)} reads back as raw data, so a rewrite would store "
-        f"the loss. Fix the class or allowed_msgpack_modules, then rerun"
+    from langgraph_events.serde._values import ValueRead  # noqa: PLC0415
+
+    reader = serde._value_reader
+    stored: Counter[tuple[str, str]] = Counter()
+    covered: Counter[bytes] = Counter()
+    # A read lists an inner record first, so the reverse meets the outer
+    # record first. A removal counts its nested records once.
+    for read in reversed(records):
+        if isinstance(read, ValueRead):
+            stored[read.resolved] += 1
+        elif covered[read.record]:
+            covered[read.record] -= 1
+        else:
+            removal = read.record if read.resolved in drop_identities else read.removed
+            stored.subtract(reader.names(removal))
+            covered.update(reader.nested_records(removal))
+    stored = +stored
+    try:
+        again, after = _written_names(serde, value)
+        _again, second = _written_names(serde, again)
+    except ValueError, TypeError:
+        after = second = Counter()
+    gone = stored - after
+    short = Counter(i[1] for i in gone.elements()) - Counter(
+        i[1] for i in (after - stored).elements()
     )
+    lost = [*(i for i in gone if short[i[1]]), *(after - second)]
+    return tuple(dict.fromkeys(Identity(*i).label for i in lost))
+
+
+def _written_loss(
+    lost: Sequence[tuple[object, tuple[str, ...]]],
+    values: dict[str, Any],
+    written: Iterable[str],
+    interrupt_writes: Sequence[tuple[str, str, Any]],
+) -> str | None:
+    """Why a value that this rewrite stores loses a class name, or ``None``.
+
+    A saver that stores the checkpoint in one blob writes every channel. A
+    bare scalar can bypass the serde, and it holds no class. Any other
+    written value that the serde did not decode is refused.
+    """
+    labels_of = {id(value): labels for value, labels in lost}
+    channels = [(f"channel {c!r}", values[c]) for c in written]
+    for value, _labels in lost:
+        if isinstance(value, dict) and value.get("channel_values") is values:
+            channels = [("the stored checkpoint", value)]
+    pending = [(f"the pending {w[1]} write", w[2]) for w in interrupt_writes]
+    for place, value in [*channels, *pending]:
+        labels = labels_of.get(id(value))
+        if labels is None and not isinstance(value, (str, int, float, type(None))):
+            return f"get_tuple() returned {place} as a copy, so no check can run"
+        if labels:
+            return (
+                f"{', '.join(labels)} in {place} reads back as raw data, so the "
+                f"write removes the class name. Fix the class or add its live "
+                f"module to allowed_msgpack_modules, then rerun"
+            )
+    return None
 
 
 def _interrupt_payloads(writes: Sequence[tuple[str, str, Any]]) -> list[Any]:
@@ -270,8 +334,7 @@ def plan_thread(
 
     reads = [record for _value, records in decoded for record in records]
     pairs = _migrated_pairs(reads)
-    lost = [r for r in reads if isinstance(r, ValueRead) and not r.revived]
-    lost_values = _labels(lost)
+    lost_values: tuple[str, ...] = ()
     values: dict[str, Any] = tup.checkpoint["channel_values"]
     dropped = _count_drops(values, drop)
     drop_identities = {(cls.__module__, cls.__qualname__) for cls in drop}
@@ -284,10 +347,15 @@ def plan_thread(
     reason = _history_refusal(unresolved, values, pending)
     if reason is not None:
         return refused(reason)
+    lost = [
+        (value, _lost_names(serde, value, records, drop_identities))
+        for value, records in decoded
+    ]
+    lost_values = tuple(dict.fromkeys(label for _v, labels in lost for label in labels))
     if not pairs and not dropped and not present:
         return ThreadRewrite(thread_id, "unchanged", lost_values=lost_values)
 
-    reason = _lost_refusal(lost) or _pending_refusal(pending, values, drop, decoded)
+    reason = _pending_refusal(pending, values, drop, decoded)
     if reason is not None:
         return refused(reason)
 
@@ -296,7 +364,9 @@ def plan_thread(
     checkpoint = _copy_checkpoint(tup.checkpoint, new_values)
     built = frozenset(id(value) for read in reads for value in read.built)
     moved = frozenset(
-        read.resolved for read in reads if isinstance(read, ValueRead) and read.touched
+        id(value)
+        for value, records in decoded
+        if any(isinstance(r, ValueRead) and r.touched for r in records)
     )
     reason, new_versions = _verify_and_bump(
         serde,
@@ -308,6 +378,7 @@ def plan_thread(
         moved,
         next_version,
     )
+    reason = reason or _written_loss(lost, values, new_versions, interrupt_writes)
     if reason is not None:
         return refused(reason)
     return RewritePlan(
@@ -492,7 +563,7 @@ def _verify_and_bump(
     interrupt_writes: Sequence[tuple[str, str, Any]],
     forbidden: set[tuple[str, str]],
     built: frozenset[int],
-    moved: frozenset[tuple[str, str]],
+    moved: frozenset[int],
     next_version: Callable[[Any, None], Any],
 ) -> tuple[str | None, dict[str, Any]]:
     """Verify every value ``put`` will encode, and bump the version of
@@ -506,18 +577,11 @@ def _verify_and_bump(
     for channel, value in checkpoint["channel_values"].items():
         where = f"channel {channel!r}"
         problem, identities = _verify_value(
-            serde,
-            value,
-            where,
-            forbidden,
-            historic,
-            built,
-            moved,
-            written=channel in changed,
+            serde, value, where, forbidden, historic, built
         )
         if problem is not None:
             return problem, {}
-        if channel in changed or identities:
+        if channel in changed or identities or id(value) in moved:
             old = versions.get(channel)
             new = next_version(old, None)
             versions[channel] = new
@@ -526,7 +590,7 @@ def _verify_and_bump(
     for _task_id, channel, value in interrupt_writes:
         where = f"the pending {channel} write"
         problem, _identities = _verify_value(
-            serde, value, where, forbidden, historic, built, moved, written=True
+            serde, value, where, forbidden, historic, built
         )
         if problem is not None:
             return problem, {}
@@ -657,9 +721,6 @@ def _verify_value(
     forbidden: set[tuple[str, str]],
     historic: set[tuple[str, str]],
     built: frozenset[int],
-    moved: frozenset[tuple[str, str]],
-    *,
-    written: bool,
 ) -> tuple[str | None, list[tuple[str, str]]]:
     """Encode *value* the way ``put`` will, then prove the bytes name no
     dropped or historic identity and revive under the strict serde, and
@@ -668,19 +729,12 @@ def _verify_value(
     *where* names the value in a refusal, ``"channel 'events'"`` or
     ``"the pending __interrupt__ write"``. Returns ``(problem,
     identities)``. *problem* is ``None`` when the value passed.
-    *identities* lists every event identity the bytes hold and each value
-    identity of *moved*, so the caller knows that the channel needs a write.
-
-    *written* is ``True`` when the value is stored for another reason. A
-    stored value must revive from its new bytes, whether its class is
-    recorded or not. The encode stores the live module of a class. An
-    allowlist that names only a re-export blocks that module, so the write
-    itself can lose the value. A value that is not written keeps its bytes.
+    *identities* lists every event identity the bytes hold, so the caller
+    knows that the channel needs a write.
     """
     from langgraph_events.serde._jsonplus import (  # noqa: PLC0415
         _scan_identities,
     )
-    from langgraph_events.serde._values import ValueRead  # noqa: PLC0415
 
     try:
         data = serde.dumps_typed(value)
@@ -703,16 +757,8 @@ def _verify_value(
                 f"the re-encode still names historic identity {identity[1]} in {where}",
                 [],
             )
-    problem, reads = _revival_problem(serde, data, value, where, built)
-    carried = [*identities, *sorted({r.resolved for r in reads} & moved)]
-    lost = _labels(r for r in reads if isinstance(r, ValueRead) and not r.revived)
-    if problem is None and lost and (written or carried):
-        problem = (
-            f"{', '.join(lost)} in {where} reads back as raw data after the "
-            f"write. Add each class at its live module to "
-            f"allowed_msgpack_modules, then rerun"
-        )
-    return problem, carried
+    problem = _revival_problem(serde, data, value, where, built)
+    return problem, identities
 
 
 def _revival_problem(
@@ -721,10 +767,10 @@ def _revival_problem(
     value: object,
     where: str,
     built: frozenset[int],
-) -> tuple[str | None, list[StoredRead]]:
+) -> str | None:
     """Why the bytes *data* of *value* in *where* do not revive, or do not
     settle, or why a model a migration built in *value* is invalid, or
-    ``None``, with the records that the read of the bytes met.
+    ``None``.
 
     The bytes settle when a read of them migrates no record. Then a read
     of the store after the write migrates nothing, unless the saver did
@@ -736,7 +782,7 @@ def _revival_problem(
         try:
             serde.loads_typed(data)
         except ValueError as exc:
-            return f"the rewritten value in {where} does not revive ({exc})", []
+            return f"the rewritten value in {where} does not revive ({exc})"
     met = reads[start:]
     unsettled = dict.fromkeys(live for _stored, live in _migrated_pairs(met))
     if unsettled:
@@ -744,15 +790,15 @@ def _revival_problem(
             f"a migration of {', '.join(unsettled)} does not settle: a read of "
             f"the rewritten value in {where} changes it again. Make each "
             f"class-stage transform return its own output unchanged, then rerun"
-        ), met
+        )
     invalid = _invalid_model(value, "", built, inside=False)
     if invalid is None:
-        return None, met
+        return None
     return (
         f"the rewritten value in {where} holds an invalid {invalid}. Fix the "
         f"migration that builds the value so that the value validates, then "
         f"rerun"
-    ), met
+    )
 
 
 def _invalid_model(
