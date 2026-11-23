@@ -2,12 +2,13 @@
 
 import annotationlib
 import contextlib
+import copy
 import enum
 import json
 import sys
 import threading
 import types
-from dataclasses import InitVar, dataclass, field
+from dataclasses import InitVar, dataclass, field, is_dataclass, replace
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict
 
@@ -19,6 +20,7 @@ from _value_move_fixtures import HoldsMoved, Moved
 from conftest import Started
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.serde.jsonplus import _option
+from langgraph.checkpoint.sqlite import SqliteSaver
 
 from langgraph_events import (
     EventGraph,
@@ -32,6 +34,7 @@ from langgraph_events.serde import (
     NamespaceAwareSerde,
     UnreachableMigrationWarning,
     migrate_value_from,
+    replay_reducer,
 )
 from langgraph_events.serde.migrations import (
     BaselineStale,
@@ -93,6 +96,9 @@ class Outer:
 
 class Other(enum.Enum):
     ONE = 1
+
+
+AliasOfOther = Other
 
 
 class Held(IntegrationEvent):
@@ -1283,7 +1289,43 @@ def _keep_only_high_in_place(kwargs: dict[str, Any]) -> dict[str, Any]:
     return kwargs
 
 
+class CopiedDeep(IntegrationEvent):
+    moved: Priority | None = None
+    value: Any = None
+
+
+class RebuiltValues(IntegrationEvent):
+    moved: Priority | None = None
+    value: Any = None
+
+
+class CopiedDict(IntegrationEvent):
+    moved: Priority | None = None
+    value: Any = None
+
+
+@dataclass
+class Box:
+    inner: Any = None
+
+
+class Wrapped(IntegrationEvent):
+    moved: Priority | None = None
+    value: Any = None
+
+
+class ClearsFirst(IntegrationEvent):
+    moved: Priority | None = None
+    first: Any = None
+    second: Any = None
+
+
 _LOG_EVENTS = [
+    CopiedDeep,
+    RebuiltValues,
+    CopiedDict,
+    Wrapped,
+    ClearsFirst,
     HoldsAny,
     FilteredInPlace,
     DroppedHolder,
@@ -1295,6 +1337,27 @@ _LOG_EVENTS = [
     RenamedHolder,
 ]
 _REMOVALS = [
+    Migration.transform_fields(target=CopiedDeep, transform=copy.deepcopy),
+    Migration.transform_fields(
+        target=RebuiltValues,
+        transform=lambda kw: {
+            **kw,
+            "value": [replace(v) if is_dataclass(v) else v for v in kw["value"]],
+        },
+    ),
+    Migration.transform_fields(
+        target=CopiedDict, transform=lambda kw: {**kw, "value": dict(kw["value"])}
+    ),
+    Migration.transform_fields(
+        target=Wrapped,
+        transform=lambda kw: {
+            **kw,
+            "value": kw["value"] if isinstance(kw["value"], Box) else Box(kw["value"]),
+        },
+    ),
+    Migration.transform_fields(
+        target=ClearsFirst, transform=lambda kw: {**kw, "first": None}
+    ),
     Migration.transform_fields(
         target=FilteredInPlace, transform=_keep_only_high_in_place
     ),
@@ -1314,7 +1377,11 @@ _REMOVALS = [
     Migration.rename(old_module=_HERE, old_qualname="OldHolder", to=RenamedHolder),
 ]
 _LOST_MEMBER = _ext(0, _HERE, "Priority", "no")
+_HEALTHY_MEMBER = _ext(0, _HERE, "Priority", "low")
+_HEALTHY_BASE = _ext(2, _HERE, "Base", {"a": 1, "b": 2})
+_LOST_BASE = _ext(2, _HERE, "Base", {"a": 1, "b": 2, "gone": 3})
 _DEAD_MODULE = "dead_value_module"
+_LOST_MODEL = _ext(5, _DEAD_MODULE, "Card", {"priority": "high"})
 
 
 @on(HoldsAny)
@@ -1407,6 +1474,13 @@ def describe_a_rewrite_that_would_remove_a_stored_class():
             record = _ext(0, temp_module.__name__, "Other", 1)
 
             assert _value_thread(tmp_path, record).status == "rewrite"
+
+        def it_plans_a_module_level_alias(tmp_path: Path):
+            record = _ext(0, _HERE, "AliasOfOther", 1)
+
+            thread = _value_thread(tmp_path, record)
+
+            assert (thread.status, thread.lost_values) == ("rewrite", ())
 
         def it_does_not_flag_a_framework_re_export(tmp_path: Path):
             from ag_ui.core import Context
@@ -1529,6 +1603,28 @@ def describe_a_rewrite_that_would_remove_a_stored_class():
             assert thread.status == "rewrite"
             assert thread.lost_values == (f"{_DEAD_MODULE}:Tone",)
 
+    def when_a_lost_value_reads_as_none_beside_a_none_channel():
+        def it_refuses_the_write(tmp_path: Path):
+            reducers = [_reducer(Ref, Priority), _note_reducer()]
+
+            def graph(store_saver: BaseCheckpointSaver[Any]) -> EventGraph:
+                store_saver.serde = EventTopology([_choose], reducers=reducers).serde(
+                    _MOVES
+                )
+                return EventGraph(
+                    [_choose], reducers=reducers, checkpointer=store_saver
+                )
+
+            saver = MemorySaver()
+            graph(saver).invoke(Started(), config=_cfg("t1"))
+            _store_blob(saver, "t1", "ref", _ext(0, _GONE, "Priority", "no"))
+            _store_blob(saver, "t1", "note", None)
+            target = MigrationTarget(graph=graph, baseline=tmp_path / "b.json")
+
+            report = target.build(saver).store.plan_rewrite(thread_ids=["t1"])
+
+            assert report.threads[0].status == "refused"
+
     def when_a_pending_interrupt_holds_the_value():
         def _paused(tmp_path: Path, *held: ormsgpack.Ext) -> Any:
             saver = MemorySaver()
@@ -1554,8 +1650,6 @@ def describe_a_rewrite_that_would_remove_a_stored_class():
             assert "the pending __interrupt__ write" in thread.reason
 
         def it_refuses_a_deleted_member_on_a_one_blob_saver(tmp_path: Path):
-            from langgraph.checkpoint.sqlite import SqliteSaver
-
             with SqliteSaver.from_conn_string(":memory:") as saver:
                 saver.serde = NamespaceAwareSerde(_MOVES, events=[Started, AskPriority])
                 _ask.priority = Priority.HIGH  # type: ignore[attr-defined]
@@ -1581,114 +1675,204 @@ def describe_a_rewrite_that_would_remove_a_stored_class():
             assert thread.status == "rewrite"
 
     def when_a_declared_migration_removes_the_value():
-        def it_plans_a_value_held_only_by_a_dropped_event(tmp_path: Path):
-            saver = _log_saver(
-                _event(HoldsAny, moved=_moved()),
-                _event(DroppedHolder, value=_LOST_MEMBER),
-            )
+        @pytest.mark.parametrize(
+            ("log", "drop"),
+            [
+                pytest.param(
+                    [
+                        lambda: _event(HoldsAny, moved=_moved()),
+                        lambda: _event(DroppedHolder, value=_LOST_MEMBER),
+                    ],
+                    [DroppedHolder],
+                    id="a damaged value held only by a dropped event",
+                ),
+                pytest.param(
+                    [
+                        lambda: _event(HoldsAny, moved=_moved()),
+                        lambda: _event(
+                            DroppedHolder,
+                            value=[_event(DroppedHolder, value=_LOST_MEMBER)],
+                        ),
+                    ],
+                    [DroppedHolder],
+                    id="a damaged value in a nested dropped event",
+                ),
+                *(
+                    pytest.param(
+                        [lambda c=c: _event(c, moved=_moved(), value=_HEALTHY_MEMBER)],
+                        [],
+                        id=f"a healthy field through {c.__name__}",
+                    )
+                    for c in (Trimmed, Replaced, SplitSource, Filled)
+                ),
+                pytest.param(
+                    [
+                        lambda: _event(
+                            RenamedHolder,
+                            "OldHolder",
+                            moved=_moved(),
+                            value=_HEALTHY_MEMBER,
+                        )
+                    ],
+                    [],
+                    id="a healthy field through a rename",
+                ),
+                pytest.param(
+                    [
+                        lambda: _event(
+                            FilteredInPlace,
+                            moved=_moved(),
+                            value=[_HEALTHY_MEMBER, _moved()],
+                        )
+                    ],
+                    [],
+                    id="a healthy value that a transform removes in place",
+                ),
+                pytest.param(
+                    [lambda: _event(CopiedDeep, moved=_moved(), value=[_HEALTHY_BASE])],
+                    [],
+                    id="a deep copy of a healthy value",
+                ),
+                pytest.param(
+                    [lambda: _event(Wrapped, moved=_moved(), value=_HEALTHY_BASE)],
+                    [],
+                    id="a wrapper around a healthy value",
+                ),
+                pytest.param(
+                    [
+                        lambda: _event(
+                            ClearsFirst,
+                            moved=_moved(),
+                            first=_HEALTHY_MEMBER,
+                            second=1,
+                        )
+                    ],
+                    [],
+                    id="a transform that clears a healthy value",
+                ),
+                pytest.param(
+                    [
+                        lambda: _event(
+                            ClearsFirst,
+                            moved=_moved(),
+                            first=_HEALTHY_MEMBER,
+                            second=_HEALTHY_MEMBER,
+                        )
+                    ],
+                    [],
+                    id="a transform that clears one of two equal members",
+                ),
+            ],
+        )
+        def it_plans_the_removal(tmp_path: Path, log: list[Any], drop: list[type]):
+            saver = _log_saver(*(entry() for entry in log))
 
             thread = (
                 _log_store(saver, tmp_path)
-                .plan_rewrite(thread_ids=["t1"], drop=[DroppedHolder])
+                .plan_rewrite(thread_ids=["t1"], drop=drop)
                 .threads[0]
             )
 
             assert thread.status == "rewrite"
 
         @pytest.mark.parametrize(
-            ("cls", "qualname"),
+            ("log", "drop", "name"),
             [
-                (Trimmed, None),
-                (Replaced, None),
-                (SplitSource, None),
+                *(
+                    pytest.param(
+                        [lambda c=c: _event(c, moved=_moved(), value=_LOST_MEMBER)],
+                        [],
+                        "Priority",
+                        id=f"a damaged field through {c.__name__}",
+                    )
+                    for c in (Trimmed, Replaced, SplitSource)
+                ),
+                pytest.param(
+                    [
+                        lambda: _event(
+                            RenamedHolder,
+                            "OldHolder",
+                            moved=_moved(),
+                            value=_LOST_MEMBER,
+                        )
+                    ],
+                    [],
+                    "Priority",
+                    id="a damaged field that the migration keeps",
+                ),
+                pytest.param(
+                    [
+                        lambda: _event(HoldsAny, moved=_moved(), value=_LOST_MEMBER),
+                        lambda: _event(DroppedHolder, value=_HEALTHY_MEMBER),
+                    ],
+                    [DroppedHolder],
+                    "Priority",
+                    id="a healthy drop beside a loss of the same class",
+                ),
+                pytest.param(
+                    [
+                        lambda: _event(HoldsAny, moved=_moved(), value=_LOST_MEMBER),
+                        lambda: _event(
+                            DroppedHolder,
+                            value=[_event(DroppedHolder, value=_LOST_MEMBER)],
+                        ),
+                    ],
+                    [DroppedHolder],
+                    "Priority",
+                    id="a nested drop beside a loss of the same class",
+                ),
+                pytest.param(
+                    [
+                        lambda: _event(
+                            FilteredInPlace,
+                            moved=_moved(),
+                            value=[_HEALTHY_MEMBER, _LOST_MEMBER],
+                        )
+                    ],
+                    [],
+                    "Priority",
+                    id="a loss that an in-place transform keeps",
+                ),
+                pytest.param(
+                    [lambda: _event(CopiedDeep, moved=_moved(), value=[_LOST_MEMBER])],
+                    [],
+                    "Priority",
+                    id="a deep copy of a lost enum",
+                ),
+                *(
+                    pytest.param(
+                        [
+                            lambda c=c: _event(
+                                c, moved=_moved(), value=[_HEALTHY_BASE, _LOST_BASE]
+                            )
+                        ],
+                        [],
+                        "Base",
+                        id=f"a damaged dataclass through {c.__name__}",
+                    )
+                    for c in (CopiedDeep, RebuiltValues, Wrapped)
+                ),
+                pytest.param(
+                    [lambda: _event(CopiedDict, moved=_moved(), value=_LOST_MODEL)],
+                    [],
+                    "Card",
+                    id="a dict copy of a lost model",
+                ),
             ],
         )
-        def it_plans_a_field_that_a_migration_drops_or_replaces(
-            tmp_path: Path, cls: type, qualname: str | None
+        def it_refuses_the_loss(
+            tmp_path: Path, log: list[Any], drop: list[type], name: str
         ):
-            saver = _log_saver(
-                _event(cls, qualname, moved=_moved(), value=_LOST_MEMBER)
-            )
-
-            thread = _log_store(saver, tmp_path).plan_rewrite(thread_ids=["t1"])
-
-            assert thread.threads[0].status == "rewrite"
-
-        def it_plans_a_healthy_value_through_a_fill(tmp_path: Path):
-            record = _ext(0, _HERE, "Priority", "low")
-            saver = _log_saver(_event(Filled, moved=_moved(), value=record))
-
-            thread = _log_store(saver, tmp_path).plan_rewrite(thread_ids=["t1"])
-
-            assert thread.threads[0].status == "rewrite"
-
-        def it_plans_a_healthy_value_through_a_rename(tmp_path: Path):
-            record = _ext(0, _HERE, "Priority", "low")
-            saver = _log_saver(
-                _event(RenamedHolder, "OldHolder", moved=_moved(), value=record)
-            )
-
-            thread = _log_store(saver, tmp_path).plan_rewrite(thread_ids=["t1"])
-
-            assert thread.threads[0].status == "rewrite"
-
-        def it_refuses_a_nested_drop_beside_a_lost_value_of_the_same_class(
-            tmp_path: Path,
-        ):
-            inner = _event(DroppedHolder, value=_LOST_MEMBER)
-            saver = _log_saver(
-                _event(HoldsAny, moved=_moved(), value=_LOST_MEMBER),
-                _event(DroppedHolder, value=[inner]),
-            )
+            saver = _log_saver(*(entry() for entry in log))
 
             thread = (
                 _log_store(saver, tmp_path)
-                .plan_rewrite(thread_ids=["t1"], drop=[DroppedHolder])
+                .plan_rewrite(thread_ids=["t1"], drop=drop)
                 .threads[0]
             )
 
             assert thread.status == "refused"
-            assert f"{_HERE}:Priority" in thread.reason
-
-        def it_plans_a_nested_drop_alone(tmp_path: Path):
-            inner = _event(DroppedHolder, value=_LOST_MEMBER)
-            saver = _log_saver(
-                _event(HoldsAny, moved=_moved()),
-                _event(DroppedHolder, value=[inner]),
-            )
-
-            thread = (
-                _log_store(saver, tmp_path)
-                .plan_rewrite(thread_ids=["t1"], drop=[DroppedHolder])
-                .threads[0]
-            )
-
-            assert thread.status == "rewrite"
-
-        def it_plans_a_value_that_a_transform_removes_in_place(tmp_path: Path):
-            held = [_ext(0, _HERE, "Priority", "low"), _moved()]
-            saver = _log_saver(_event(FilteredInPlace, moved=_moved(), value=held))
-
-            thread = _log_store(saver, tmp_path).plan_rewrite(thread_ids=["t1"])
-
-            assert thread.threads[0].status == "rewrite"
-
-        def it_refuses_a_loss_that_an_in_place_transform_keeps(tmp_path: Path):
-            held = [_ext(0, _HERE, "Priority", "low"), _LOST_MEMBER]
-            saver = _log_saver(_event(FilteredInPlace, moved=_moved(), value=held))
-
-            thread = _log_store(saver, tmp_path).plan_rewrite(thread_ids=["t1"])
-
-            assert thread.threads[0].status == "refused"
-
-        def it_refuses_a_loss_in_a_field_that_the_migration_kept(tmp_path: Path):
-            saver = _log_saver(
-                _event(RenamedHolder, "OldHolder", moved=_moved(), value=_LOST_MEMBER)
-            )
-
-            thread = _log_store(saver, tmp_path).plan_rewrite(thread_ids=["t1"])
-
-            assert thread.threads[0].status == "refused"
+            assert f":{name}" in thread.reason
 
     def when_the_thread_has_no_migration():
         def it_stays_unchanged(tmp_path: Path):
@@ -1698,6 +1882,98 @@ def describe_a_rewrite_that_would_remove_a_stored_class():
 
             assert thread.threads[0].status == "unchanged"
             assert thread.threads[0].lost_values == (f"{_HERE}:Priority",)
+
+
+class Painted(IntegrationEvent):
+    color: Any = None
+    note: str = ""
+
+
+@on(Started)
+def _paint(event: Started) -> Painted:
+    return Painted(color=sys.modules[_PAINT_MODULE].Color.BLUE, note="keep")
+
+
+_PAINT_MODULE = "paint_value_module"
+_latest_color = ScalarReducer[Painted, Any](
+    name="latest_color", event_type=Painted, fn=lambda event: [event.color]
+)
+
+
+def _install_color(monkeypatch: pytest.MonkeyPatch, *, blue: bool) -> type:
+    module = types.ModuleType(_PAINT_MODULE)
+    members = {"RED": "red", **({"BLUE": "blue"} if blue else {})}
+    color = enum.Enum("Color", members, module=_PAINT_MODULE)  # type: ignore[misc]
+    module.Color = color  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, _PAINT_MODULE, module)
+    return color
+
+
+def _paint_graph(
+    saver: BaseCheckpointSaver[Any], color: type, migrations: list[Migration]
+) -> EventGraph:
+    saver.serde = NamespaceAwareSerde(
+        migrations, events=[Started, Painted], values=[color]
+    )
+    return EventGraph([_paint], reducers=[_latest_color], checkpointer=saver)
+
+
+def _replay_latest_color(saver: BaseCheckpointSaver[Any]) -> None:
+    tup = saver.get_tuple(_cfg("t1"))
+    assert tup is not None
+    checkpoint = tup.checkpoint
+    rebuilt = replay_reducer(_latest_color, checkpoint["channel_values"]["events"])
+    old = checkpoint["channel_versions"]["latest_color"]
+    new = saver.get_next_version(old, None)
+    checkpoint["channel_values"]["latest_color"] = rebuilt
+    checkpoint["channel_versions"]["latest_color"] = new
+    for seen in checkpoint["versions_seen"].values():
+        if seen.get("latest_color") == old:
+            seen["latest_color"] = new
+    saver.put(
+        tup.parent_config or _cfg("t1"),
+        checkpoint,
+        tup.metadata,
+        {"latest_color": new},
+    )
+
+
+def describe_removing_a_damaged_value_on_purpose():
+    def when_the_member_returns_for_one_release():
+        @pytest.mark.parametrize("saver_kind", ["memory", "sqlite"])
+        def it_stores_the_replacement_and_the_next_release_reads_it(
+            monkeypatch: pytest.MonkeyPatch, saver_kind: str
+        ):
+            with (
+                SqliteSaver.from_conn_string(":memory:")
+                if saver_kind == "sqlite"
+                else contextlib.nullcontext(MemorySaver())
+            ) as saver:
+                color = _install_color(monkeypatch, blue=True)
+                _paint_graph(saver, color, []).invoke(Started(), config=_cfg("t1"))
+                color = _install_color(monkeypatch, blue=True)
+
+                def clear_blue(fields: dict[str, Any]) -> dict[str, Any]:
+                    held = fields.get("color")
+                    return {**fields, "color": None if held is color.BLUE else held}  # type: ignore[attr-defined]
+
+                clear = Migration.transform_fields(target=Painted, transform=clear_blue)
+                store = _paint_graph(saver, color, [clear]).event_store
+                written = store.rewrite_store(thread_ids=["t1"]).threads[0]
+                _replay_latest_color(saver)
+
+                next_color = _install_color(monkeypatch, blue=False)
+                next_store = _paint_graph(saver, next_color, []).event_store
+                planned = next_store.plan_rewrite(thread_ids=["t1"]).threads[0]
+                tup = saver.get_tuple(_cfg("t1"))
+
+            assert tup is not None
+            values = tup.checkpoint["channel_values"]
+            painted = next(e for e in values["events"] if isinstance(e, Painted))
+            assert written.status == "rewrite"
+            assert (planned.status, planned.lost_values) == ("unchanged", ())
+            assert (painted.color, painted.note) == (None, "keep")
+            assert values["latest_color"] == [None]
 
 
 type _ForwardOnly = "Later" | None  # noqa: F821

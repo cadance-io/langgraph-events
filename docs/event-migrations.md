@@ -433,22 +433,88 @@ A reached class must be bound at module level under its `__name__`, because Lang
 
 WARNING: `PostgresSaver` stores a bare `str`, `int`, `float` or `bool` subclass inline, with no class name. So a `StrEnum` alone in a channel reads back as a plain `str`, and no move applies to it. A `StrEnum` inside a list, a dataclass or an event keeps its identity.
 
-A rewrite never removes a class name from a stored channel, unless a declared migration removes it on purpose. A write that would do so is refused, for any class, recorded or not. The check counts the class names in the stored bytes and in the re-encoded bytes, then reads the new bytes again. A value that `drop=` or a migration removes is not a loss. A name that returns under another module is a re-export, and it is not a loss when the allowlist admits the new name.
+A rewrite never removes a class name from a stored channel, unless a declared migration removes it on purpose. A write that would do so is refused, for any class, recorded or not.
+
+The check judges each stored value before any event migration runs, so a transform cannot hide a loss. It encodes the revived value, compares the class names with the stored names, then reads the new bytes again. A name that returns under another module is a re-export, and it is not a loss when the allowlist admits the new name. A healthy value that a migration removes is not a loss. A value inside an event of `drop=` is not judged.
+
+WARNING: a migration that deletes, replaces, copies or wraps a damaged field is refused while the class or member stays deleted. To remove such a value, follow [Removing a damaged value on purpose](#removing-a-damaged-value-on-purpose).
 
 WARNING: a refused thread makes the [`rewrite` plan of the deploy](migration-gate.md#a-checkpoint-that-a-plan-refuses) exit 1, so an old damaged value in a written channel can stop a deploy. Fix the class or add its live module to `allowed_msgpack_modules`, then rerun.
 
 A write stores the live module of a class. WARNING: when `allowed_msgpack_modules` names only a re-export, the new bytes are blocked, and the next read returns raw data. So the rewrite refuses a thread when a value in a channel that it writes does not revive from the new bytes, also for a class that is not recorded. Add the live module to the allowlist, then rerun. A channel that the rewrite does not write keeps its bytes and is not refused. A saver that stores the checkpoint in one blob, such as `SqliteSaver`, writes every channel, so the check covers every channel of that saver.
 
-Known limit, unchanged by this check: a normal run of a thread stores a lost value as `None` or as raw data. The check covers only a rewrite. Fix the class or the allowlist before you resume a thread that holds a lost value.
+Known limit, unchanged by this check: a normal run or resume of a thread stores a lost value as `None` or as raw data. The check covers only a rewrite. Fix the class or the allowlist before you resume a thread that holds a lost value.
 
 The rewrite also refuses a completed task write that holds a moved value. Resume or abandon that thread, then rerun.
 
 The rewrite stores only the latest checkpoint of each thread. WARNING: after you delete the decorator, an older checkpoint of a thread still names the old module, so a read of that checkpoint loses the value. Do not time-travel to such a checkpoint. A latest checkpoint that still holds old bytes stays `unchanged`, and the `rewrite` output names the class under `reads as raw data`. That line does not fail the command.
 
+### Removing a damaged value on purpose
+
+A damaged value is a stored value that the current code cannot revive, for example a value of a deleted enum member. To remove it, restore the class or member for one release, and transform the value away. The library has no separate operation for this removal.
+
+Release 1 restores the member and declares the transform:
+
+```python
+from enum import Enum
+
+from langgraph_events import IntegrationEvent
+from langgraph_events.serde import NamespaceAwareSerde
+from langgraph_events.serde.migrations import Migration
+
+
+class Color(Enum):
+    RED = "red"
+    BLUE = "blue"  # restored for one release
+
+
+class Painted(IntegrationEvent):
+    color: Color | None = None
+    note: str = ""
+
+
+def clear_blue(fields: dict[str, object]) -> dict[str, object]:
+    color = fields.get("color")
+    return {**fields, "color": None if color is Color.BLUE else color}
+
+
+serde = NamespaceAwareSerde(
+    [Migration.transform_fields(target=Painted, transform=clear_blue)],
+    events=[Painted],
+)
+```
+
+1. Deploy release 1, then run `rewrite --apply --expect <fingerprint>`. The value is healthy when the transform removes it, so the check accepts the write.
+2. If a reducer channel holds the value, rebuild that channel before release 2. The rewrite does not recompute a reducer.
+3. In release 2, delete `BLUE` and the transform. The thread reads `None` in `color` and keeps `note`.
+
+A transform reaches only an event. To clear a channel that a reducer derives from events, replay the reducer while the member is restored, and store the result:
+
+```python
+...  # checkpointer, config and latest_color come from your app
+from langgraph_events.serde import replay_reducer
+
+tup = checkpointer.get_tuple(config)  # config names thread_id and checkpoint_ns
+checkpoint = tup.checkpoint
+rebuilt = replay_reducer(latest_color, checkpoint["channel_values"]["events"])
+old = checkpoint["channel_versions"]["latest_color"]
+new = checkpointer.get_next_version(old, None)
+checkpoint["channel_values"]["latest_color"] = rebuilt
+checkpoint["channel_versions"]["latest_color"] = new
+for seen in checkpoint["versions_seen"].values():
+    if seen.get("latest_color") == old:
+        seen["latest_color"] = new
+checkpointer.put(
+    tup.parent_config or config, checkpoint, tup.metadata, {"latest_color": new}
+)
+```
+
+WARNING: if you skip the replay, the channel keeps the value, and the value is damaged again after release 2. A channel that no reducer derives from events has no such path, so a damaged value there stays refused until the class or member returns.
+
 ## What is not migrated
 
 - **The fields of a non-Event payload**, such as a Pydantic model, a plain dataclass or a LangGraph `Interrupt` wrapper, go through LangGraph's default serde. A move of the class is migrated, see [Moving a value class](#moving-a-value-class). A change to its fields is not. An event nested inside `Interrupt.value` is migrated.
-- **A value class deleted with no successor** has no retirement path. Keep the class, or declare a move onto a class that replaces it.
+- **A value class deleted with no successor** has no retirement operation. Keep the class, declare a move onto a class that replaces it, or follow [Removing a damaged value on purpose](#removing-a-damaged-value-on-purpose).
 - **A reducer channel rename** is a LangGraph channel-routing concern. See [What changes safely](#what-changes-safely).
 - **A payload that `ormsgpack` refuses to encode** raises at the source, with no fallback. The library has no extension point for the encoder.
 - **A non-reducer channel value** has no rebuild path. Recovery is custom: read, transform, then write back through the put API of the saver.

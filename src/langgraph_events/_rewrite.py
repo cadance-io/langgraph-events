@@ -10,7 +10,6 @@ write, drop the stored events the caller named, and build the
 checkpoint the graph will store. It never touches a store.
 """
 
-from collections import Counter
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -178,62 +177,40 @@ def _migrated_pairs(reads: Sequence[StoredRead]) -> tuple[tuple[str, str], ...]:
     return tuple(pairs)
 
 
-def _written_names(
-    serde: NamespaceAwareSerde, value: object
-) -> tuple[object, Counter[tuple[str, str]]]:
-    """*value* after one write and one read, and the names the write stores."""
-    data = serde.dumps_typed(value)
-    names = serde._value_reader.names(data[1]) if data[0] == "msgpack" else Counter()
-    return serde.loads_typed(data), names
-
-
 def _lost_names(
-    serde: NamespaceAwareSerde,
-    value: object,
-    records: Sequence[StoredRead],
-    drop_identities: set[tuple[str, str]],
+    records: Sequence[StoredRead], drop_identities: set[tuple[str, str]]
 ) -> tuple[str, ...]:
-    """Each class name that a write of *value* removes from its stored bytes.
-
-    A name that a ``drop`` or a migration removes on purpose does not count.
-    A name that returns under another module is a re-export, matched per
-    ``__name__`` and per record. The second read proves that the allowlist
-    admits the new name. A value that cannot encode or read keeps no name.
-    """
+    """Each class name that a write removes from *records*, before any
+    migration. A record inside an event of ``drop`` does not count."""
     from langgraph_events.serde._values import ValueRead  # noqa: PLC0415
 
-    reader = serde._value_reader
-    stored: Counter[tuple[str, str]] = Counter()
-    covered: Counter[bytes] = Counter()
-    # A read lists an inner record first, so the reverse meets the outer
-    # record first. A removal counts its nested records once.
+    lost: list[tuple[str, str]] = []
+    skip = 0
     for read in reversed(records):
-        if isinstance(read, ValueRead):
-            stored[read.resolved] += 1
-        elif covered[read.record]:
-            covered[read.record] -= 1
-        else:
-            removal = read.record if read.resolved in drop_identities else read.removed
-            stored.subtract(reader.names(removal))
-            covered.update(reader.nested_records(removal))
-    stored = +stored
-    try:
-        again, after = _written_names(serde, value)
-        _again, second = _written_names(serde, again)
-    except ValueError, TypeError:
-        after = second = Counter()
-    gone = stored - after
-    short = Counter(i[1] for i in gone.elements()) - Counter(
-        i[1] for i in (after - stored).elements()
-    )
-    lost = [*(i for i in gone if short[i[1]]), *(after - second)]
+        if skip:
+            skip -= 1
+        elif isinstance(read, ValueRead):
+            lost.extend(read.lost)
+        elif read.resolved in drop_identities:
+            skip = read.nested
     return tuple(dict.fromkeys(Identity(*i).label for i in lost))
 
 
+def _records_of(
+    value: object, decoded: Sequence[DecodedValue]
+) -> list[StoredRead] | None:
+    """The reads of each decode that returned *value*, or ``None`` when the
+    serde did not decode it. ``None`` is one object, so several decodes can
+    return it."""
+    found = [records for result, records in decoded if result is value]
+    return [read for records in found for read in records] if found else None
+
+
 def _written_loss(
-    lost: Sequence[tuple[object, tuple[str, ...]]],
+    decoded: Sequence[DecodedValue],
+    drop_identities: set[tuple[str, str]],
     values: dict[str, Any],
-    written: Iterable[str],
+    written_channels: Iterable[str],
     interrupt_writes: Sequence[tuple[str, str, Any]],
 ) -> str | None:
     """Why a value that this rewrite stores loses a class name, or ``None``.
@@ -242,16 +219,18 @@ def _written_loss(
     bare scalar can bypass the serde, and it holds no class. Any other
     written value that the serde did not decode is refused.
     """
-    labels_of = {id(value): labels for value, labels in lost}
-    channels = [(f"channel {c!r}", values[c]) for c in written]
-    for value, _labels in lost:
+    places = [(f"channel {c!r}", values[c]) for c in written_channels]
+    for value, _records in decoded:
         if isinstance(value, dict) and value.get("channel_values") is values:
-            channels = [("the stored checkpoint", value)]
+            places = [("the stored checkpoint", value)]
     pending = [(f"the pending {w[1]} write", w[2]) for w in interrupt_writes]
-    for place, value in [*channels, *pending]:
-        labels = labels_of.get(id(value))
-        if labels is None and not isinstance(value, (str, int, float, type(None))):
+    for place, value in [*places, *pending]:
+        records = _records_of(value, decoded)
+        if records is None:
+            if isinstance(value, (str, int, float, type(None))):
+                continue
             return f"get_tuple() returned {place} as a copy, so no check can run"
+        labels = _lost_names(records, drop_identities)
         if labels:
             return (
                 f"{', '.join(labels)} in {place} reads back as raw data, so the "
@@ -347,11 +326,7 @@ def plan_thread(
     reason = _history_refusal(unresolved, values, pending)
     if reason is not None:
         return refused(reason)
-    lost = [
-        (value, _lost_names(serde, value, records, drop_identities))
-        for value, records in decoded
-    ]
-    lost_values = tuple(dict.fromkeys(label for _v, labels in lost for label in labels))
+    lost_values = _lost_names(reads, drop_identities)
     if not pairs and not dropped and not present:
         return ThreadRewrite(thread_id, "unchanged", lost_values=lost_values)
 
@@ -362,7 +337,12 @@ def plan_thread(
     interrupt_writes = tuple(w for w in pending if w[1] == _INTERRUPT_CHANNEL)
     new_values, changed = _drop_from_log(values, drop)
     checkpoint = _copy_checkpoint(tup.checkpoint, new_values)
-    built = frozenset(id(value) for read in reads for value in read.built)
+    built = frozenset(
+        id(value)
+        for read in reads
+        if not isinstance(read, ValueRead)
+        for value in read.built
+    )
     moved = frozenset(
         id(value)
         for value, records in decoded
@@ -378,7 +358,9 @@ def plan_thread(
         moved,
         next_version,
     )
-    reason = reason or _written_loss(lost, values, new_versions, interrupt_writes)
+    reason = reason or _written_loss(
+        decoded, drop_identities, values, new_versions, interrupt_writes
+    )
     if reason is not None:
         return refused(reason)
     return RewritePlan(
@@ -509,7 +491,7 @@ def _pending_refusal(
         if channel == _INTERRUPT_CHANNEL:
             continue
         where = f"thread has a completed task write on task {task_id!r} in"
-        records = next((r for result, r in decoded if result is value), None)
+        records = _records_of(value, decoded)
         if records is None:
             return (
                 f"{where} channel {channel!r} that get_tuple() of the "

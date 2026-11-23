@@ -15,7 +15,6 @@ compatible LangGraph version.
 import contextlib
 import dataclasses
 import re
-from collections import Counter
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -132,70 +131,17 @@ class EventRead(NamedTuple):
     is ``True`` when the migration table rewrote the record. *built* holds
     each field value that the migration added or replaced, as the object
     the event holds. A stored value that the migration kept is not in it.
-    *record* is the stored event record. *removed* packs each stored
-    extension record whose value the migration output does not hold.
+    *nested* counts the reads inside this record. They come just before it.
     """
 
     stored: tuple[str, str]
     resolved: tuple[str, str]
     touched: bool
     built: tuple[object, ...]
-    record: bytes
-    removed: bytes
+    nested: int
 
 
 StoredRead = EventRead | ValueRead
-
-
-def _held_records(
-    record: bytes, kwargs: dict[str, Any]
-) -> list[tuple[ormsgpack.Ext, object]]:
-    """Each extension record in the fields of *record*, with its value in
-    *kwargs*, the decoded form of the same fields."""
-    held: list[tuple[ormsgpack.Ext, object]] = []
-
-    def walk(raw: object, value: object) -> None:
-        if isinstance(raw, ormsgpack.Ext):
-            held.append((raw, value))
-        elif isinstance(raw, dict) and isinstance(value, dict):
-            for key, item in raw.items():
-                walk(item, value[key])
-        elif isinstance(raw, list) and isinstance(value, list):
-            for item, decoded in zip(raw, value, strict=True):
-                walk(item, decoded)
-
-    stored = ormsgpack.unpackb(
-        record, ext_hook=ormsgpack.Ext, option=ormsgpack.OPT_NON_STR_KEYS
-    )[2]
-    walk(stored, kwargs)
-    return held
-
-
-def _removed_records(
-    held: list[tuple[ormsgpack.Ext, object]], output: dict[str, Any]
-) -> bytes:
-    """The records of *held* whose value *output* does not hold, packed.
-
-    Each object in *output* accounts for one record, so one of two equal
-    enum members can leave. An empty result is ``b""``.
-    """
-    present: Counter[int] = Counter()
-    pending: list[object] = [output]
-    while pending:
-        node = pending.pop()
-        present[id(node)] += 1
-        if isinstance(node, dict):
-            pending.extend(node.values())
-        elif isinstance(node, (list, tuple)):
-            pending.extend(node)
-    removed = []
-    for raw, value in held:
-        present[id(value)] -= 1
-        if present[id(value)] < 0:
-            removed.append(raw)
-    return (
-        ormsgpack.packb(removed, option=ormsgpack.OPT_NON_STR_KEYS) if removed else b""
-    )
 
 
 """One stored record that a read met: an event or a recorded value."""
@@ -434,6 +380,7 @@ def _make_ext_hook(
     values: ValueReader,
     unresolved: list[UnrevivedIdentity] | None = None,
     reads: list[StoredRead] | None = None,
+    encode: Callable[[object], tuple[str, bytes]] | None = None,
 ) -> Callable[[int, bytes], Any]:
     """Build an ext-hook that records revival errors into *errors*.
 
@@ -470,9 +417,10 @@ def _make_ext_hook(
     *values* reads every record that LangGraph owns. With no move and
     no *reads*, its hook is *fallback* itself.
     """
-    read_value = values.hook(fallback, reads)
+    read_value = values.hook(fallback, reads, encode)
 
     def _ext_hook(code: int, data: bytes) -> object:
+        start = 0 if reads is None else len(reads)
         if code == EXT_INTERRUPT:
             # Inner unpack uses our hook so a nested EXT_NAMESPACE_AWARE_EVENT
             # inside ``value`` resolves back to its namespaced class.
@@ -524,7 +472,7 @@ def _make_ext_hook(
                 *ormsgpack.unpackb(
                     data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
                 ),
-                record=data,
+                start=start,
                 reformat=True,
             )
         if code != EXT_NAMESPACE_AWARE_EVENT:
@@ -533,7 +481,7 @@ def _make_ext_hook(
             *ormsgpack.unpackb(
                 data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
             ),
-            record=data,
+            start=start,
             reformat=False,
         )
 
@@ -542,7 +490,7 @@ def _make_ext_hook(
         qualname: str,
         kwargs: dict[str, Any],
         *,
-        record: bytes,
+        start: int,
         reformat: bool,
     ) -> object:
         """Migrate and construct one stored event record. *reformat* says
@@ -558,9 +506,6 @@ def _make_ext_hook(
             stored = (module_name, qualname)
             # A fill mutates ``kwargs`` in place: snapshot it first.
             before = dict(kwargs) if reads is not None else {}
-            # A transform can mutate a stored list in place, so each pair
-            # is taken before the migration runs.
-            held = [] if reads is None else _held_records(record, kwargs)
             module_name, qualname, kwargs = tables.migrate(
                 module_name, qualname, kwargs
             )
@@ -589,8 +534,7 @@ def _make_ext_hook(
                         (module_name, qualname),
                         touched,
                         built,
-                        record,
-                        _removed_records(held, kwargs),
+                        len(reads) - start,
                     )
                 )
             return instance
@@ -950,6 +894,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                     values=self._value_reader,
                     unresolved=self._unresolved,
                     reads=self._reads,
+                    encode=self.dumps_typed if self._decoded is not None else None,
                 ),
                 option=ormsgpack.OPT_NON_STR_KEYS,
             )

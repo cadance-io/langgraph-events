@@ -8,7 +8,6 @@ keeps the allowlist and every constructor.
 """
 
 import annotationlib
-import contextlib
 import dataclasses
 import enum
 import sys
@@ -209,7 +208,7 @@ class ValueRead(NamedTuple):
 
     stored: tuple[str, str]
     resolved: tuple[str, str]
-    built: tuple[object, ...] = ()
+    lost: tuple[tuple[str, str], ...] = ()
 
     @property
     def touched(self) -> bool:
@@ -245,9 +244,13 @@ class ValueReader:
         self,
         fallback: Callable[[int, bytes], Any],
         reads: list[Any] | None,
+        encode: Callable[[object], tuple[str, bytes]] | None = None,
     ) -> Callable[[int, bytes], Any]:
         """The read of one value record. With no move and no read to
-        record, this is *fallback* itself, so a read pays nothing."""
+        record, this is *fallback* itself, so a read pays nothing.
+
+        With *encode*, each outermost record is judged here, before any event
+        migration can see its value."""
         if not self.moves and reads is None:
             return fallback
 
@@ -256,9 +259,13 @@ class ValueReader:
                 return fallback(code, data)
             met: list[ValueRead] = []
             relabelled = self._relabel(code, data, met)
+            value = fallback(code, relabelled)
             if reads is not None:
+                if encode is not None and met:
+                    lost = self._lost(value, met, fallback, encode)
+                    met[-1] = met[-1]._replace(lost=lost)
                 reads.extend(met)
-            return fallback(code, relabelled)
+            return value
 
         return read
 
@@ -268,17 +275,37 @@ class ValueReader:
         self._relabel(-1, data, met)
         return Counter(read.resolved for read in met)
 
-    def nested_records(self, data: bytes) -> Counter[bytes]:
-        """The payload of each extension record below *data*, per payload."""
-        found: Counter[bytes] = Counter()
+    def _lost(
+        self,
+        value: object,
+        met: list[ValueRead],
+        fallback: Callable[[int, bytes], Any],
+        encode: Callable[[object], tuple[str, bytes]],
+    ) -> tuple[tuple[str, str], ...]:
+        """Each name of *met* that a write of *value* removes.
 
-        def nested(_code: int, payload: bytes) -> None:
-            found[payload] += 1
-            found.update(self.nested_records(payload))
-
-        with contextlib.suppress(ormsgpack.MsgpackDecodeError):
-            ormsgpack.unpackb(data, ext_hook=nested, option=ormsgpack.OPT_NON_STR_KEYS)
-        return found
+        A second read proves that the allowlist admits a name the write
+        changed, for example the defining module of a re-export.
+        """
+        names = {_defining_name(read.resolved, value): read.resolved for read in met}
+        stored = Counter(_defining_name(read.resolved, value) for read in met)
+        try:
+            kind, written = encode(value)
+            if kind != "msgpack":
+                return tuple(names.values())
+            after = self.names(written)
+            if after == Counter(read.resolved for read in met):
+                return ()
+            again = ormsgpack.unpackb(
+                written, ext_hook=fallback, option=ormsgpack.OPT_NON_STR_KEYS
+            )
+            second = self.names(encode(again)[1])
+        except ValueError, TypeError:
+            return tuple(names.values())
+        return (
+            *(names[name] for name in (stored - after).elements()),
+            *(after - second).elements(),
+        )
 
     def _relabel(self, code: int, data: bytes, met: list[ValueRead]) -> bytes:
         """*data* with each moved name replaced. It is the same object when
@@ -310,6 +337,22 @@ class ValueReader:
         ):
             met.append(ValueRead(identity, resolved))
         return payload
+
+
+def _defining_name(identity: tuple[str, str], value: object) -> tuple[str, str]:
+    """The name that a write of the class bound at *identity* stores.
+
+    Only a module that is already imported counts, so a stored name never
+    triggers an import. An unbound name stays as it is. When a module
+    ``__getattr__`` raises, *value*, the revived record, names the class.
+    """
+    try:
+        found = getattr(sys.modules.get(identity[0]), identity[1], None)
+    except Exception:  # a module __getattr__ can raise any type
+        found = type(value) if type(value).__name__ == identity[1] else None
+        if found is None:
+            return identity
+    return (found.__module__, found.__name__) if isinstance(found, type) else identity
 
 
 def _named_record(code: int, record: object) -> tuple[str, str] | None:
