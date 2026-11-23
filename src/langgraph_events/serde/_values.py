@@ -8,50 +8,55 @@ keeps the allowlist and every constructor.
 """
 
 import annotationlib
+import contextlib
 import dataclasses
 import enum
 import sys
 import typing
 from collections import Counter
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from dataclasses import dataclass, fields, is_dataclass
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeGuard, cast
 
 import ormsgpack
 from langgraph.checkpoint.serde.jsonplus import (
     EXT_CONSTRUCTOR_KW_ARGS,
     EXT_CONSTRUCTOR_POS_ARGS,
     EXT_CONSTRUCTOR_SINGLE_ARG,
+    EXT_METHOD_SINGLE_ARG,
     EXT_PYDANTIC_V1,
     EXT_PYDANTIC_V2,
     _option,
 )
 
 from langgraph_events._event import Event, Namespace
-from langgraph_events._identity import ValueIdentity, live_value_class
+from langgraph_events.serde._jsonplus import EXT_NAMESPACE_AWARE_EVENT
 from langgraph_events.serde.migrations._core import (
     _VALUE_SOURCES_ATTR,
     Migration,
     MoveValue,
-    _annotation_types,
-    _enclosing_names,
-    _field_hints,
-    _is_pydantic_model,
+    ValueIdentity,
     _unreachable_migrate_from_siblings,
+    live_value_class,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Iterable, Mapping
+    from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 
 _NAMED_RECORD_CODES = frozenset(
     {
         EXT_CONSTRUCTOR_SINGLE_ARG,
         EXT_CONSTRUCTOR_POS_ARGS,
         EXT_CONSTRUCTOR_KW_ARGS,
+        EXT_METHOD_SINGLE_ARG,
         EXT_PYDANTIC_V1,
         EXT_PYDANTIC_V2,
+        EXT_NAMESPACE_AWARE_EVENT,
     }
 )
-"""The LangGraph ext codes whose payload starts ``[module, name, ...]``."""
+"""The ext codes whose payload starts ``[module, name, ...]``."""
+
+_RAW_DATA_TYPES = (dict, list, str, int, float, bool, bytes, type(None))
+"""The types that LangGraph returns for a record that it cannot revive."""
 
 _FRAMEWORK_ROOTS = frozenset(
     {"langchain_core", "langgraph", "langgraph_events", "pydantic"}
@@ -63,6 +68,84 @@ def _client_module(module: str) -> bool:
     """*module* is outside the standard library and the framework packages."""
     root = module.partition(".")[0]
     return root not in sys.stdlib_module_names and root not in _FRAMEWORK_ROOTS
+
+
+def _annotation_types(
+    tp: object, followed: set[object] | None = None
+) -> Iterator[object]:
+    """*tp* and every type under it, depth first: each type argument, the
+    class of a generic alias, the value of a type alias, and the enum of a
+    ``Literal`` member. *followed* holds each alias of this walk, so each
+    alias is evaluated once. A name that only ``TYPE_CHECKING`` imports stays
+    an unresolved reference. An alias that cannot be evaluated is opaque.
+    """
+    followed = set() if followed is None else followed
+    yield tp
+    origin = typing.get_origin(tp)
+    if origin is typing.Literal:
+        members = typing.get_args(tp)
+        yield from dict.fromkeys(type(m) for m in members if isinstance(m, enum.Enum))
+        return
+    alias = origin if isinstance(origin, typing.TypeAliasType) else tp
+    if isinstance(alias, typing.TypeAliasType):
+        if alias not in followed:
+            followed.add(alias)
+            with contextlib.suppress(NameError, TypeError, AttributeError):
+                value = annotationlib.call_evaluate_function(
+                    alias.evaluate_value, annotationlib.Format.FORWARDREF
+                )
+                yield from _annotation_types(value, followed)
+    elif isinstance(origin, type):
+        yield origin
+    for arg in typing.get_args(tp):
+        yield from _annotation_types(arg, followed)
+
+
+def _is_pydantic_model(tp: object) -> TypeGuard[type]:
+    """Duck-typed the same way the LangGraph serializer decides to write
+    a pydantic ext record: a class with a callable ``model_dump`` (v2)
+    or a callable ``dict`` (v1). Both decode branches upstream revive by
+    ``__name__`` and return the dump dict on a miss."""
+    return isinstance(tp, type) and (
+        callable(getattr(tp, "model_dump", None)) or callable(getattr(tp, "dict", None))
+    )
+
+
+def _enclosing_names(cls: type) -> dict[str, Any]:
+    """Names visible from *cls*'s enclosing class bodies, outermost first.
+
+    ``typing.get_type_hints`` resolves a forward reference against the
+    module only. A field typed as a sibling nested in the same
+    ``Namespace`` needs the enclosing class's names as ``localns``. Stops
+    at the first level it cannot walk, such as ``<locals>``.
+    """
+    names: dict[str, Any] = {}
+    obj: Any = sys.modules.get(cls.__module__)
+    for part in cls.__qualname__.split(".")[:-1]:
+        obj = getattr(obj, part, None) if obj is not None else None
+        if obj is None:
+            break
+        names.update(vars(obj))
+    return names
+
+
+def _field_hints(cls: type) -> dict[str, Any]:
+    """Resolved annotation per dataclass field of *cls*.
+
+    Restricted to ``dataclasses.fields()``: a ``ClassVar`` or ``InitVar``
+    is never checkpointed, so it must not be checked. A name that cannot
+    resolve stays a ``ForwardRef`` in the ``FORWARDREF`` format, so it
+    hides one field only, not the class. The event class is the
+    caller's. This check must not turn its own annotation problem into
+    a serde build failure.
+    """
+    if not is_dataclass(cls):
+        return {}
+    names = {f.name for f in fields(cls)}
+    hints = typing.get_type_hints(
+        cls, localns=_enclosing_names(cls), format=annotationlib.Format.FORWARDREF
+    )
+    return {name: tp for name, tp in hints.items() if name in names}
 
 
 def _is_named_tuple(tp: object) -> bool:
@@ -204,10 +287,12 @@ def _bound(cls: type, where: str) -> ValueIdentity:
 
 
 class ValueRead(NamedTuple):
-    """One named client value record that a read met in the stored bytes."""
+    """One named record that a read met in the stored bytes. *source* is its
+    ext code and its bytes after the relabel."""
 
     stored: tuple[str, str]
     resolved: tuple[str, str]
+    source: tuple[int, bytes]
     lost: tuple[tuple[str, str], ...] = ()
 
     @property
@@ -221,22 +306,16 @@ class ValueReader:
     """Relabels each moved value in the stored bytes, then calls LangGraph."""
 
     moves: Mapping[tuple[str, str], tuple[str, str]]
-    recorded: frozenset[tuple[str, str]]
     needles: tuple[bytes, ...]
 
     @classmethod
-    def build(
-        cls, scope: ValueScope, move_table: Mapping[tuple[str, str], type]
-    ) -> ValueReader:
-        """The reader of *scope* and of the moves in *move_table*."""
+    def build(cls, move_table: Mapping[tuple[str, str], type]) -> ValueReader:
+        """The reader of the moves in *move_table*."""
         return cls(
             moves={
                 source: (target.__module__, target.__name__)
                 for source, target in move_table.items()
             },
-            recorded=frozenset(
-                {*scope.classes, *map(ValueIdentity.of, move_table.values())}
-            ),
             needles=tuple({module.encode() for module, _name in move_table}),
         )
 
@@ -282,13 +361,17 @@ class ValueReader:
         fallback: Callable[[int, bytes], Any],
         encode: Callable[[object], tuple[str, bytes]],
     ) -> tuple[tuple[str, str], ...]:
-        """Each name of *met* that a write of *value* removes.
+        """Each name of *met* that is lost. A loss needs two facts: a write
+        of *value* removes the name, and the stored record does not revive
+        alone. So a healthy enum that a model coerces to ``str`` is no loss,
+        and neither is a raw enum that its model restores.
 
         A second read proves that the allowlist admits a name the write
         changed, for example the defining module of a re-export.
         """
-        names = {_defining_name(read.resolved, value): read.resolved for read in met}
-        stored = Counter(_defining_name(read.resolved, value) for read in met)
+        defined = [(_defining_name(read.resolved, value), read) for read in met]
+        names = {name: read.resolved for name, read in defined}
+        stored = Counter(name for name, _read in defined)
         try:
             kind, written = encode(value)
             if kind != "msgpack":
@@ -302,8 +385,13 @@ class ValueReader:
             second = self.names(encode(again)[1])
         except ValueError, TypeError:
             return tuple(names.values())
+        gone = stored - after
         return (
-            *(names[name] for name in (stored - after).elements()),
+            *(
+                read.resolved
+                for name, read in defined
+                if name in gone and not _revives_alone(read, name, fallback)
+            ),
             *(after - second).elements(),
         )
 
@@ -330,13 +418,28 @@ class ValueReader:
             record[0:2] = resolved
             changed = True
         payload = ormsgpack.packb(record, option=_option) if changed else data
-        if (
-            identity is not None
-            and resolved is not None
-            and (resolved in self.recorded or _client_module(resolved[0]))
-        ):
-            met.append(ValueRead(identity, resolved))
+        if identity is not None and resolved is not None:
+            met.append(ValueRead(identity, resolved, (code, payload)))
         return payload
+
+
+def _revives_alone(
+    read: ValueRead, name: tuple[str, str], fallback: Callable[[int, bytes], Any]
+) -> bool:
+    """The stored record of *read* alone revives as the class *name*.
+
+    A raw data type never counts, even when the stored name is bound to it,
+    because LangGraph returns that same type for a record it cannot revive.
+    """
+    revived = type(fallback(*read.source))
+    return (
+        revived not in _RAW_DATA_TYPES
+        and (
+            revived.__module__,
+            revived.__name__,
+        )
+        == name
+    )
 
 
 def _defining_name(identity: tuple[str, str], value: object) -> tuple[str, str]:

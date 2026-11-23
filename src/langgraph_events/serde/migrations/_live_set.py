@@ -131,10 +131,10 @@ class LiveSetOutcome:
         """
         head = str(self.final).splitlines()[0]
         lost = {
-            t.thread_id: t.lost_values_line
+            t.thread_id: line
             for report in (*self.passes, self.final)
             for t in report.threads
-            if t.lost_values
+            if (line := t.lost_values_line)
         }
         if self.clean:
             return "\n".join(

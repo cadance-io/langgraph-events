@@ -10,7 +10,6 @@ import typing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, Literal
 
-from langgraph_events._identity import live_value_class
 from langgraph_events.serde.migrations._baseline import (
     Baseline,
     Hold,
@@ -22,6 +21,7 @@ from langgraph_events.serde.migrations._core import (
     PROGRAM,
     TARGET_PLACEHOLDER,
     MigrationKey,
+    live_value_class,
 )
 from langgraph_events.serde.migrations._revive import (
     revival_failure,
@@ -31,7 +31,8 @@ from langgraph_events.serde.migrations._revive import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from langgraph_events._identity import Identity, ValueIdentity
+    from langgraph_events._identity import Identity
+    from langgraph_events.serde.migrations._core import ValueIdentity
     from langgraph_events.serde.migrations._target import MigrationTarget, Snapshot
 
 Rule = Literal["baseline", "names", "coverage", "revive", "handlers", "release"]
@@ -251,18 +252,53 @@ class UncoveredValue:
 
     code: ClassVar[str] = "uncovered-value"
     identity: ValueIdentity
+    moved_to: tuple[ValueIdentity, ...] = ()
 
     @property
     def subject(self) -> str:
         return self.identity.label
 
     def lines(self, invocation: Invocation) -> tuple[str, ...]:
-        """The explanation, then the next command."""
+        """The explanation, each remedy, then the next command."""
+        hint = (
+            (
+                "A class with the same name lives at "
+                f"{', '.join(i.label for i in self.moved_to)}.",
+            )
+            if self.moved_to
+            else ()
+        )
         return (
             "No class defined at this identity and no move covers it, so a "
             "stored value of it reads back as raw data.",
-            f"Add @migrate_value_from({self.identity.module!r}) to the class "
-            f"that replaces it, then run: {invocation.baseline_update()}",
+            *hint,
+            "If you deleted the class on purpose, follow 'Removing a damaged "
+            "value on purpose' in docs/event-migrations.md. Then delete this "
+            'entry from "values" in the baseline file.',
+            f"If the class moved, add @migrate_value_from("
+            f"{self.identity.module!r}) to the class that replaces it, then "
+            f"run: {invocation.baseline_update()}",
+        )
+
+
+@dataclass(frozen=True)
+class ValueMoveOutOfScope:
+    """A ``@migrate_value_from`` class that the serde does not reach."""
+
+    code: ClassVar[str] = "value-move-out-of-scope"
+    identity: ValueIdentity
+
+    @property
+    def subject(self) -> str:
+        return self.identity.label
+
+    def lines(self, invocation: Invocation) -> tuple[str, ...]:
+        """The explanation, then the fix and the next command."""
+        return (
+            "The class declares @migrate_value_from, but no event field or "
+            "channel type of the serde reaches it, so its move does nothing.",
+            f"Pass the class in values= of the serde, then run: "
+            f"{invocation.baseline_update()}",
         )
 
 
@@ -344,6 +380,7 @@ Finding = (
     BaselineStale
     | AnonymousCallable
     | MigrationOutOfScope
+    | ValueMoveOutOfScope
     | Uncovered
     | Unrevivable
     | UncoveredValue
@@ -431,6 +468,7 @@ def check(target: MigrationTarget, *, previous: Path | None = None) -> GateRepor
         AnonymousCallable(k) for k in sorted(code.migrations.keys) if k.anonymous
     )
     findings.extend(MigrationOutOfScope(i) for i in code.migrations_out_of_scope())
+    findings.extend(ValueMoveOutOfScope(i) for i in code.serde.unreached_value_moves())
     findings.extend(_coverage_and_revival(code, judged))
     findings.extend(_value_findings(code, judged))
     findings.extend(
@@ -590,11 +628,19 @@ def _value_findings(
     if isinstance(judged.values, ValuesUnrecorded):
         return []
     moves = code.serde._client_tables.value_move_table
+    reached = sorted(code.serde.value_identities())
     findings: list[UncoveredValue | UnrevivableValue] = []
     for identity in sorted(judged.values):
         live = moves.get(identity) or live_value_class(*identity)
         if live is None:
-            findings.append(UncoveredValue(identity))
+            findings.append(
+                UncoveredValue(
+                    identity,
+                    tuple(
+                        v for v in reached if v.name == identity.name and v != identity
+                    ),
+                )
+            )
             continue
         failure = value_revival_failure(code.serde, live)
         if failure is not None:

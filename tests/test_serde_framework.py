@@ -367,7 +367,7 @@ def describe_framework_migrations():
                 with client_serde._record_reads() as reads:
                     revived = client_serde.loads_typed(("msgpack", stored))
                 assert revived == SourceDropped(**_DROPPED)
-                assert reads == []
+                assert not any(read.touched for read in reads)
 
     def describe_inside_an_interrupt():
         def it_revives_an_old_HandlerRaised_in_the_value(client_serde):

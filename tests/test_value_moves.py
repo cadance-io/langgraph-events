@@ -4,12 +4,17 @@ import annotationlib
 import contextlib
 import copy
 import enum
+import ipaddress
 import json
+import pathlib
 import sys
 import threading
 import types
+import uuid
+from collections import deque
 from dataclasses import InitVar, dataclass, field, is_dataclass, replace
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, time, timedelta
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict
 
 import ormsgpack
@@ -18,9 +23,18 @@ import pytest
 from _value_move_fixtures import GONE as _GONE
 from _value_move_fixtures import HoldsMoved, Moved
 from conftest import Started
+from langchain_core.documents import Document
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.checkpoint.serde.jsonplus import _option
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer, _option
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.types import Interrupt, Send
 
 from langgraph_events import (
     EventGraph,
@@ -2014,3 +2028,290 @@ def describe_a_type_alias_in_a_field():
             NamespaceAwareSerde(events=[HoldsDenseAlias])
 
             assert calls <= 5
+
+
+class ValuesOnly(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(use_enum_values=True)
+
+    priority: Priority = Priority.LOW
+
+
+class StrDefault(pydantic.BaseModel):
+    label: str = Priority.HIGH
+
+
+class StrLabel(pydantic.BaseModel):
+    label: str = "x"
+
+
+class LiteralLabel(pydantic.BaseModel):
+    label: Literal["high", "low"] = "low"
+
+
+def _assigned(model: pydantic.BaseModel) -> pydantic.BaseModel:
+    model.label = Priority.HIGH  # type: ignore[attr-defined]
+    return model
+
+
+def _named(code: int, module: str, name: str, *rest: object) -> ormsgpack.Ext:
+    return ormsgpack.Ext(code, ormsgpack.packb([module, name, *rest], option=_option))
+
+
+class Stamp(datetime):
+    pass
+
+
+def describe_the_loss_test():
+    def when_a_model_coerces_a_healthy_enum():
+        @pytest.mark.parametrize(
+            "build",
+            [
+                ValuesOnly,
+                StrDefault,
+                lambda: _assigned(StrLabel()),
+                lambda: StrLabel().model_copy(update={"label": Priority.HIGH}),
+                lambda: _assigned(LiteralLabel()),
+                lambda: LiteralLabel().model_copy(update={"label": Priority.HIGH}),
+            ],
+            ids=[
+                "use_enum_values",
+                "str_default",
+                "str_assignment",
+                "str_model_copy",
+                "literal_assignment",
+                "literal_model_copy",
+            ],
+        )
+        def it_plans_a_rewrite(tmp_path: Path, build: Any):
+            thread = _value_thread(tmp_path, _dumped(build()))
+
+            assert (thread.status, thread.lost_values) == ("rewrite", ())
+
+    def when_a_class_outside_the_client_does_not_revive():
+        @pytest.mark.parametrize(
+            "record",
+            [
+                _named(
+                    5, "langchain_core.messages.ai", "Gone", {"a": 1}, "model_validate"
+                ),
+                _named(2, "langgraph.types", "Gone", {"a": 1}),
+                _named(0, "platform.enums", "Gone", "gold"),
+            ],
+            ids=["langchain", "langgraph", "stdlib_root"],
+        )
+        def it_refuses_the_thread(tmp_path: Path, record: ormsgpack.Ext):
+            assert _value_thread(tmp_path, record).status == "refused"
+
+    def when_a_method_record_does_not_revive():
+        def it_refuses_the_thread(tmp_path: Path):
+            record = _named(3, _HERE, "Stamp", "2026-01-01T00:00:00", "fromisoformat")
+
+            assert _value_thread(tmp_path, record).status == "refused"
+
+    def when_a_framework_value_is_healthy():
+        @pytest.mark.parametrize(
+            "value",
+            [
+                AIMessage(
+                    content="x", tool_calls=[{"name": "t", "args": {}, "id": "1"}]
+                ),
+                HumanMessage(content=[{"type": "text", "text": "x"}]),
+                ToolMessage(content="r", tool_call_id="1"),
+                SystemMessage(content="s"),
+                AIMessageChunk(content="c"),
+                Document(page_content="d", metadata={"a": 1}),
+                Send("n", {"a": 1}),
+                Interrupt(value={"a": 1}, id="i"),
+                uuid.UUID(int=1),
+                datetime(2026, 1, 1, tzinfo=UTC),
+                date(2026, 1, 1),
+                time(1, 2),
+                timedelta(1),
+                Decimal("1.5"),
+                pathlib.Path("/a"),
+                {1, 2},
+                frozenset({1}),
+                deque([1]),
+                ipaddress.ip_address("1.1.1.1"),
+                ipaddress.ip_network("10.0.0.0/8"),
+            ],
+            ids=lambda value: type(value).__name__,
+        )
+        def it_names_no_lost_value(tmp_path: Path, value: object):
+            thread = _value_thread(tmp_path, _dumped(value))
+
+            assert (thread.status, thread.lost_values) == ("rewrite", ())
+
+    def when_langgraph_wrote_a_client_event_in_constructor_form():
+        def it_plans_a_rewrite(tmp_path: Path):
+            plain = JsonPlusSerializer().dumps_typed(HoldsAny(value="kept"))[1]
+            record = ormsgpack.unpackb(
+                plain, ext_hook=ormsgpack.Ext, option=ormsgpack.OPT_NON_STR_KEYS
+            )
+            saver = _log_saver(record, _event(HoldsAny, moved=_moved()))
+
+            thread = (
+                _log_store(saver, tmp_path).plan_rewrite(thread_ids=["t1"]).threads[0]
+            )
+
+            assert (thread.status, thread.lost_values) == ("rewrite", ())
+
+    def when_the_report_renders_a_refused_thread():
+        def it_states_the_loss_once(tmp_path: Path):
+            saver = _log_saver(_event(HoldsAny, moved=_moved(), value=_LOST_MEMBER))
+
+            rendered = str(_log_store(saver, tmp_path).plan_rewrite(thread_ids=["t1"]))
+
+            assert rendered.count(f"{_HERE}:Priority") == 1
+            assert "Removing a damaged value on purpose" in rendered
+
+
+def _tone_graph(*tones: type) -> Any:
+    def graph(saver: BaseCheckpointSaver[Any]) -> EventGraph:
+        saver.serde = NamespaceAwareSerde(events=[Started], values=tones)
+        return EventGraph([_noop_moved], checkpointer=saver)
+
+    return graph
+
+
+def describe_a_deleted_value_class():
+    def when_its_entry_stays_in_the_baseline():
+        def it_names_the_final_step_and_a_same_name_class(
+            tmp_path: Path, temp_module: types.ModuleType
+        ):
+            class Tone(enum.Enum):
+                SOFT = "soft"
+
+            _bind(temp_module, Tone)
+            path = tmp_path / "b.json"
+            target = MigrationTarget(graph=_tone_graph(Tone), baseline=path)
+            update_baseline(target)
+            _add_value(path, _GONE, "Tone")
+
+            finding = check(target).findings[0]
+
+            assert isinstance(finding, UncoveredValue)
+            assert [i.label for i in finding.moved_to] == [
+                f"{temp_module.__name__}:Tone"
+            ]
+            lines = " ".join(finding.lines(Invocation("app:target")))
+            assert "Removing a damaged value on purpose" in lines
+            assert '"values"' in lines
+
+    def when_the_whole_recipe_runs():
+        def it_ends_on_a_passing_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+            def install() -> type:
+                module = types.ModuleType(_PAINT_MODULE)
+                tone = enum.Enum("Tone", {"SOFT": "soft"}, module=_PAINT_MODULE)  # type: ignore[misc]
+                module.Tone = tone  # type: ignore[attr-defined]
+                monkeypatch.setitem(sys.modules, _PAINT_MODULE, module)
+                return tone
+
+            def build(tones: tuple[type, ...], *migrations: Migration) -> Any:
+                def graph(saver: BaseCheckpointSaver[Any]) -> EventGraph:
+                    saver.serde = NamespaceAwareSerde(
+                        migrations, events=[Started, Painted], values=tones
+                    )
+                    return EventGraph([_noop_moved], checkpointer=saver)
+
+                return graph
+
+            path, previous = tmp_path / "b.json", tmp_path / "previous.json"
+            saver = MemorySaver()
+            tone = install()
+            build((tone,))(saver).invoke(Started(), config=_cfg("t1"))
+            _store_blob(
+                saver,
+                "t1",
+                "events",
+                [_event(Painted, color=_named(0, _PAINT_MODULE, "Tone", "soft"))],
+            )
+            update_baseline(MigrationTarget(graph=build((tone,)), baseline=path))
+
+            def clear(fields: dict[str, Any]) -> dict[str, Any]:
+                return {**fields, "color": None}
+
+            brought_back = MigrationTarget(
+                graph=build(
+                    (tone,), Migration.transform_fields(target=Painted, transform=clear)
+                ),
+                baseline=path,
+                store=lambda: contextlib.nullcontext(saver),
+            )
+            update_baseline(brought_back)
+            previous.write_text(path.read_text())
+            outcome = _rewrite(brought_back)
+
+            del sys.modules[_PAINT_MODULE]
+            final = MigrationTarget(
+                graph=build(()),
+                baseline=path,
+                store=lambda: contextlib.nullcontext(saver),
+            )
+            update_baseline(final, previous=previous)
+            refused = check(final, previous=previous)
+            raw = json.loads(path.read_text())
+            raw["values"] = [v for v in raw["values"] if v["name"] != "Tone"]
+            path.write_text(json.dumps(raw))
+
+            assert [t.status for t in outcome.final.threads] == ["unchanged"]
+            assert [f.code for f in refused.findings] == ["uncovered-value"]
+            assert check(final, previous=previous).passed
+            assert (
+                final.build(saver)
+                .store.plan_rewrite(thread_ids=["t1"])
+                .threads[0]
+                .lost_values
+                == ()
+            )
+
+
+def describe_an_unreached_value_move():
+    def when_a_decorated_class_is_not_reached():
+        def it_is_a_coverage_finding(tmp_path: Path, temp_module: types.ModuleType):
+            class Reached(enum.Enum):
+                ONE = 1
+
+            @migrate_value_from(_GONE)
+            class Lonely(enum.Enum):
+                ONE = 1
+
+            _bind(temp_module, Reached)
+            _bind(temp_module, Lonely)
+            path = tmp_path / "b.json"
+            with pytest.warns(UnreachableMigrationWarning):
+                target = MigrationTarget(graph=_tone_graph(Reached), baseline=path)
+                update_baseline(target)
+                report = check(target)
+
+            assert [(f.code, f.subject) for f in report.findings] == [
+                ("value-move-out-of-scope", f"{temp_module.__name__}:Lonely")
+            ]
+
+    def when_the_decorator_is_on_an_event():
+        def it_refuses_at_decoration():
+            with pytest.raises(TypeError, match="@migrate_from"):
+
+                @migrate_value_from(_GONE)
+                class NotAValue(IntegrationEvent):
+                    pass
+
+
+def describe_baseline_prune_of_a_move():
+    def when_a_dropped_move_has_the_identity_of_a_live_event():
+        def it_keeps_the_recorded_fields_of_the_event(tmp_path: Path):
+            path, previous = tmp_path / "b.json", tmp_path / "previous.json"
+            target = MigrationTarget(graph=_plain_graph, baseline=path)
+            update_baseline(target)
+            raw = json.loads(path.read_text())
+            entry = next(e for e in raw["events"] if e["qualname"] == "Held")
+            entry["fields"] = [*entry["fields"], "old_field"]
+            raw["migrations"].append({"label": f"move {_HERE}:Held"})
+            path.write_text(json.dumps(raw))
+            previous.write_text(path.read_text())
+
+            update_baseline(target, previous=previous)
+
+            after = json.loads(path.read_text())
+            held = next(e for e in after["events"] if e["qualname"] == "Held")
+            assert "old_field" in held["fields"]

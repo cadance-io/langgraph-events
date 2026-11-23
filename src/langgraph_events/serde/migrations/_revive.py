@@ -27,8 +27,8 @@ from langgraph_events.serde._jsonplus import (
     _UNEXPECTED_KWARG_RE,
     EXT_NAMESPACE_AWARE_EVENT,
 )
+from langgraph_events.serde._values import _is_pydantic_model
 from langgraph_events.serde.migrations._core import (
-    _is_pydantic_model,
     _resolve_identity,
     _resolve_rename,
 )

@@ -6,8 +6,6 @@ ext-hook between unpack and revive. The wire format is unchanged from
 prior library versions — this is a read-side affordance only. See #70.
 """
 
-import annotationlib
-import contextlib
 import dataclasses
 import enum
 import functools
@@ -22,13 +20,13 @@ from typing import (
     TYPE_CHECKING,
     Any,
     ClassVar,
+    NamedTuple,
     Protocol,
-    TypeGuard,
     TypeVar,
 )
 
 from langgraph_events._event import Event, _iter_nested_events
-from langgraph_events._identity import Identity, ValueIdentity, live_value_class
+from langgraph_events._identity import Identity
 from langgraph_events._labels import distinct_labels
 
 if TYPE_CHECKING:
@@ -36,7 +34,6 @@ if TYPE_CHECKING:
         Callable,
         Collection,
         Iterable,
-        Iterator,
         Mapping,
         Sequence,
     )
@@ -1285,6 +1282,60 @@ def _migration_label(name: str) -> str:
     return f"migration {name!r}" if name else "an unnamed migration"
 
 
+def live_value_class(module: str, name: str) -> type | None:
+    """The class that *module* itself defines under *name*, or ``None``.
+
+    A class that *module* only imports does not count, because the bytes
+    that name *module* then depend on an import that nothing records.
+    """
+    try:
+        found = getattr(importlib.import_module(module), name, None)
+    except ImportError, AttributeError:
+        return None
+    if isinstance(found, type) and (found.__module__, found.__name__) == (module, name):
+        return found
+    return None
+
+
+class ValueIdentity(NamedTuple):
+    """The stored name of a value class: its module and its ``__name__``.
+
+    LangGraph stores ``__name__``, not ``__qualname__``, and revives with
+    one ``getattr`` on the module. So a class nested in another class has no
+    identity that revives.
+    """
+
+    module: str
+    name: str
+
+    @classmethod
+    def of(cls, value_cls: type) -> ValueIdentity:
+        """The identity of *value_cls*.
+
+        Raises:
+            ValueError: when the module does not bind *value_cls* under its
+                ``__name__``.
+        """
+        if live_value_class(value_cls.__module__, value_cls.__name__) is value_cls:
+            return cls(value_cls.__module__, value_cls.__name__)
+        remedy = (
+            f"Move {value_cls.__qualname__} to module scope in {value_cls.__module__}."
+            if "." in value_cls.__qualname__
+            else f"Bind it on module {value_cls.__module__} under the name "
+            f"{value_cls.__name__!r}. Alias a parametrized generic at module "
+            f"level, for example IntBox = Box[int]."
+        )
+        raise ValueError(
+            f"Its checkpoint identity {value_cls.__module__}."
+            f"{value_cls.__name__} does not import. {remedy}"
+        )
+
+    @property
+    def label(self) -> str:
+        """``<module>:<name>``, the form every message and report uses."""
+        return f"{self.module}:{self.name}"
+
+
 def _resolve_identity(
     module: str,
     qualname: str,
@@ -1506,11 +1557,17 @@ def migrate_value_from(
 
     Raises:
         ValueError: when no old module is given.
+        TypeError: when the decorated class is an ``Event``.
     """
     if not old_modules:
         raise ValueError("migrate_value_from needs at least one old module.")
 
     def decorate(cls: type) -> type:
+        if issubclass(cls, Event):
+            raise TypeError(
+                f"{cls.__qualname__} is an Event. @migrate_value_from is for a "
+                f"value class. Use @migrate_from on an event class."
+            )
         sources = tuple((module, name or cls.__name__) for module in old_modules)
         setattr(
             cls,
@@ -1808,84 +1865,6 @@ def _serde_event_classes(
                 seen.add(id(cls))
                 out.append(cls)
     return out
-
-
-def _annotation_types(
-    tp: object, followed: set[object] | None = None
-) -> Iterator[object]:
-    """*tp* and every type under it, depth first: each type argument, the
-    class of a generic alias, the value of a type alias, and the enum of a
-    ``Literal`` member. *followed* holds each alias of this walk, so each
-    alias is evaluated once. A name that only ``TYPE_CHECKING`` imports stays
-    an unresolved reference. An alias that cannot be evaluated is opaque.
-    """
-    followed = set() if followed is None else followed
-    yield tp
-    origin = typing.get_origin(tp)
-    if origin is typing.Literal:
-        members = typing.get_args(tp)
-        yield from dict.fromkeys(type(m) for m in members if isinstance(m, enum.Enum))
-        return
-    alias = origin if isinstance(origin, typing.TypeAliasType) else tp
-    if isinstance(alias, typing.TypeAliasType):
-        if alias not in followed:
-            followed.add(alias)
-            with contextlib.suppress(NameError, TypeError, AttributeError):
-                value = annotationlib.call_evaluate_function(
-                    alias.evaluate_value, annotationlib.Format.FORWARDREF
-                )
-                yield from _annotation_types(value, followed)
-    elif isinstance(origin, type):
-        yield origin
-    for arg in typing.get_args(tp):
-        yield from _annotation_types(arg, followed)
-
-
-def _is_pydantic_model(tp: object) -> TypeGuard[type]:
-    """Duck-typed the same way the LangGraph serializer decides to write
-    a pydantic ext record: a class with a callable ``model_dump`` (v2)
-    or a callable ``dict`` (v1). Both decode branches upstream revive by
-    ``__name__`` and return the dump dict on a miss."""
-    return isinstance(tp, type) and (
-        callable(getattr(tp, "model_dump", None)) or callable(getattr(tp, "dict", None))
-    )
-
-
-def _enclosing_names(cls: type) -> dict[str, Any]:
-    """Names visible from *cls*'s enclosing class bodies, outermost first.
-
-    ``typing.get_type_hints`` resolves a forward reference against the
-    module only. A field typed as a sibling nested in the same
-    ``Namespace`` needs the enclosing class's names as ``localns``. Stops
-    at the first level it cannot walk, such as ``<locals>``.
-    """
-    names: dict[str, Any] = {}
-    obj: Any = sys.modules.get(cls.__module__)
-    for part in cls.__qualname__.split(".")[:-1]:
-        obj = getattr(obj, part, None) if obj is not None else None
-        if obj is None:
-            break
-        names.update(vars(obj))
-    return names
-
-
-def _field_hints(cls: type) -> dict[str, Any]:
-    """Resolved annotation per dataclass field of *cls*.
-
-    Restricted to ``dataclasses.fields()``: a ``ClassVar`` or ``InitVar``
-    is never checkpointed, so it must not be checked. A name that cannot
-    resolve stays a ``ForwardRef`` in the ``FORWARDREF`` format, so it
-    hides one field only, not the class. The event class is the
-    caller's. This check must not turn its own annotation problem into
-    a serde build failure.
-    """
-    if not is_dataclass(cls):
-        return {}
-    names = {f.name for f in fields(cls)}
-    hints = typing.get_type_hints(
-        cls, localns=_enclosing_names(cls), format=annotationlib.Format.FORWARDREF
-    )
-    return {name: tp for name, tp in hints.items() if name in names}
 
 
 def _init_fields(cls: type) -> frozenset[str]:

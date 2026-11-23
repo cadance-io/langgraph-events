@@ -24,7 +24,6 @@ from langgraph.types import Interrupt
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
 
-    from langgraph_events._identity import ValueIdentity
     from langgraph_events.serde.migrations._core import Migration, MigrationTables
 from langgraph.checkpoint.serde.jsonplus import (
     EXT_CONSTRUCTOR_KW_ARGS,
@@ -94,6 +93,7 @@ from langgraph_events.serde.migrations._core import (  # noqa: E402
     MigrationSet,
     SplitEvent,
     TransformFields,
+    ValueIdentity,
     _callable_id,
     _CallableError,
     _collect_decorated_migrations,
@@ -410,7 +410,7 @@ def _make_ext_hook(
 
     *reads*, when not ``None``, is a second collector. Every stored
     ``EXT_NAMESPACE_AWARE_EVENT`` record is appended to it as a
-    :class:`EventRead`, touched or not, and each recorded value as a
+    :class:`EventRead`, touched or not, and each named value as a
     :class:`ValueRead`. Only ``NamespaceAwareSerde._record_reads``
     passes one.
 
@@ -687,7 +687,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         # key set: the identities revivable with no migration at all.
         self._scope = scope
         self._value_scope = value_scope
-        self._value_reader = ValueReader.build(value_scope, client.value_move_table)
+        self._value_reader = ValueReader.build(client.value_move_table)
         self._live_identities = frozenset(scope)
         self._legacy_write = legacy_write
         self._oldest_historic = oldest_historic
@@ -706,8 +706,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                 f"in events=.",
                 UnreachableMigrationWarning,
             )
-        modules = {module for module, _qualname in scope}
-        for cls in value_scope.unreached_siblings(modules):
+        for cls in self._unreached_value_classes():
             warn_user(
                 f"{cls.__qualname__} is decorated with @migrate_value_from, but "
                 f"no event field or channel type of this serde reaches it, so "
@@ -764,7 +763,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         of the ``with`` block.
 
         Yields a collector of :data:`StoredRead` entries. There is one
-        :class:`ValueRead` per named record of a client class, and one
+        :class:`ValueRead` per named record of any class, and one
         :class:`EventRead` per stored ``EXT_NAMESPACE_AWARE_EVENT`` record
         that revived, wherever the record sat in the blob. A record that degraded to an
         :class:`UnrevivedIdentity` is not collected. The ``touched`` flag
@@ -817,6 +816,21 @@ class NamespaceAwareSerde(JsonPlusSerializer):
     def value_identities(self) -> frozenset[ValueIdentity]:
         """Each value class this serde reaches."""
         return frozenset(self._value_scope.classes)
+
+    def _unreached_value_classes(self) -> list[type]:
+        """Each ``@migrate_value_from`` class that the walk does not reach."""
+        modules = {module for module, _qualname in self._scope}
+        return self._value_scope.unreached_siblings(modules)
+
+    def unreached_value_moves(self) -> tuple[ValueIdentity, ...]:
+        """The identity of each ``@migrate_value_from`` class that this serde
+        does not reach, so that its move does nothing."""
+        return tuple(
+            sorted(
+                ValueIdentity(cls.__module__, cls.__name__)
+                for cls in self._unreached_value_classes()
+            )
+        )
 
     def live_fields(self) -> dict[Identity, frozenset[str]]:
         """The init fields of every live event class this serde speaks for.

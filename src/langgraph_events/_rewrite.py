@@ -56,7 +56,7 @@ class ThreadRewrite:
     table rewrote, as ``"module:qualname"`` strings, deduped in read
     order. ``dropped`` counts the stored events ``drop`` removed, per
     identity. ``reason`` says what to do when the status is
-    ``"refused"``. ``lost_values`` names each client value class that a
+    ``"refused"``. ``lost_values`` names each value class that a
     re-encode of its stored value removes. A thread that history refuses
     is not judged, so its ``lost_values`` is empty.
     """
@@ -78,9 +78,13 @@ class ThreadRewrite:
         )
 
     @property
-    def lost_values_line(self) -> str:
-        """The report line of ``lost_values``."""
-        return f"  {self.thread_id}: reads as raw data: {', '.join(self.lost_values)}"
+    def lost_values_line(self) -> str | None:
+        """The report line of each lost value that ``reason`` does not name."""
+        named = set((self.reason or "").replace(",", " ").split())
+        rest = [label for label in self.lost_values if label not in named]
+        if not rest:
+            return None
+        return f"  {self.thread_id}: reads as raw data: {', '.join(rest)}"
 
 
 @dataclass(frozen=True)
@@ -119,7 +123,7 @@ class RewriteReport:
             if t.status == "rewrite" and t.dropped
         )
         lines.extend(f"  {t.thread_id}: refused, {t.reason}" for t in self.refused)
-        lines.extend(t.lost_values_line for t in self.threads if t.lost_values)
+        lines.extend(line for t in self.threads if (line := t.lost_values_line))
         return "\n".join(lines)
 
 
@@ -235,7 +239,9 @@ def _written_loss(
             return (
                 f"{', '.join(labels)} in {place} reads back as raw data, so the "
                 f"write removes the class name. Fix the class or add its live "
-                f"module to allowed_msgpack_modules, then rerun"
+                f"module to allowed_msgpack_modules, then rerun. To remove the "
+                f"value, see 'Removing a damaged value on purpose' in "
+                f"docs/event-migrations.md"
             )
     return None
 

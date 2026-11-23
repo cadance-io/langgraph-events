@@ -10,10 +10,11 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from langgraph_events._identity import Identity, ValueIdentity
+from langgraph_events._identity import Identity
 from langgraph_events.serde.migrations._core import (
     MigrationKey,
     MigrationSet,
+    ValueIdentity,
     _rename_sources,
     migration_fingerprint,
 )
@@ -109,9 +110,9 @@ class CodeRecord:
         """
         pruned = dict(history)
         sources = _rename_sources(self.keys)
-        kept = {key.identity for key in current.keys}
+        kept = {key.identity for key in current.keys if key.kind != "move"}
         for key in current.deleted_since(self.keys):
-            if key.identity in kept:
+            if key.kind == "move" or key.identity in kept:
                 continue
             if key.kind == "rename" or key.identity in sources:
                 pruned.pop(key.identity, None)
