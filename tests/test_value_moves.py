@@ -8,7 +8,7 @@ import threading
 import types
 from dataclasses import InitVar, dataclass, field
 from datetime import date, timedelta
-from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict
 
 import ormsgpack
 import pydantic
@@ -170,6 +170,22 @@ class OtherSlot(TypedDict):
 
 class OtherPair(NamedTuple):
     other: Other
+
+
+@dataclass
+class GenericBox[T]:
+    item: T
+
+
+@dataclass
+class ForwardHint:
+    path: Path | None = None
+
+
+type OtherAlias = Other | None
+type OtherTree = Other | list[OtherTree]
+type BoxAlias[T] = GenericBox[T]
+type HiddenAlias = Path
 
 
 class RefSlot(TypedDict):
@@ -518,6 +534,28 @@ def describe_NamespaceAwareSerde():
 
             assert serde.value_identities() == {(_HERE, "NestedEnumCard")}
 
+    def when_an_annotation_wraps_a_stored_class():
+        @pytest.mark.parametrize(
+            ("annotation", "names"),
+            [
+                (OtherAlias, {"Other"}),
+                (OtherTree, {"Other"}),
+                (BoxAlias[int], {"GenericBox"}),
+                (GenericBox[Other], {"GenericBox", "Other"}),
+                (Literal[Other.ONE], {"Other"}),
+            ],
+        )
+        def it_records_the_class(annotation: Any, names: set[str]):
+            serde = NamespaceAwareSerde(channel_types={"slot": annotation})
+
+            assert serde.value_identities() == {(_HERE, name) for name in names}
+
+    def when_a_type_alias_names_a_type_checking_import():
+        def it_records_nothing():
+            serde = NamespaceAwareSerde(channel_types={"slot": HiddenAlias})
+
+            assert serde.value_identities() == set()
+
     def when_a_values_root_sits_in_a_module_named_like_the_standard_library():
         def it_records_the_class(monkeypatch: pytest.MonkeyPatch):
             module = types.ModuleType("tabnanny")
@@ -544,6 +582,13 @@ def _reducer(ref: Any, priority: Any) -> ScalarReducer[Chosen, Any]:
         name="ref",
         event_type=Chosen,
         fn=lambda event: ref(1, priority(event.label)),
+    )
+
+
+def _note_reducer() -> ScalarReducer[Chosen, Any]:
+    """A second value-only channel, which a move in ``ref`` does not write."""
+    return ScalarReducer[Chosen, Any](
+        name="note", event_type=Chosen, fn=lambda event: [Other.ONE]
     )
 
 
@@ -804,6 +849,111 @@ def describe_rewrite_live_set():
 
                 assert _lost(tmp_path, record) == (f"{temp_module.__name__}:Gone",)
 
+    def when_only_a_re_export_is_allowed():
+        def _plan(saver: MemorySaver, tmp_path: Path, module: str) -> Any:
+            def graph(store_saver: BaseCheckpointSaver[Any]) -> EventGraph:
+                reducers = [_reducer(Ref, Priority), _note_reducer()]
+                store_saver.serde = NamespaceAwareSerde(
+                    _MOVES,
+                    events=[Started, Chosen],
+                    values=[Ref],
+                    allowed_msgpack_modules=[*_STRICT, (module, "Other")],
+                )
+                return EventGraph(
+                    [_choose], reducers=reducers, checkpointer=store_saver
+                )
+
+            target = MigrationTarget(graph=graph, baseline=tmp_path / "b.json")
+            return target.build(saver).store.plan_rewrite(thread_ids=["t1"]).threads[0]
+
+        def _seeded(module: str) -> tuple[MemorySaver, ormsgpack.Ext]:
+            saver = MemorySaver()
+            reducers = [_reducer(Ref, Priority), _note_reducer()]
+            saver.serde = EventTopology([_choose], reducers=reducers).serde(_MOVES)
+            EventGraph([_choose], reducers=reducers, checkpointer=saver).invoke(
+                Started(), config=_cfg("t1")
+            )
+            _store_blob(saver, "t1", "ref", [_ext(0, _GONE, "Priority", "high")])
+            return saver, _ext(0, module, "Other", 1)
+
+        def when_a_written_channel_holds_the_value():
+            def it_refuses_the_thread(tmp_path: Path, temp_module: types.ModuleType):
+                temp_module.Other = Other  # type: ignore[attr-defined]
+                saver, exported = _seeded(temp_module.__name__)
+                _store_blob(
+                    saver,
+                    "t1",
+                    "ref",
+                    [_ext(0, _GONE, "Priority", "high"), exported],
+                )
+
+                thread = _plan(saver, tmp_path, temp_module.__name__)
+
+                assert thread.status == "refused"
+                assert f"{_HERE}:Other in channel 'ref' reads back" in thread.reason
+
+        def when_an_unwritten_channel_holds_the_value():
+            def it_plans_the_write(tmp_path: Path, temp_module: types.ModuleType):
+                temp_module.Other = Other  # type: ignore[attr-defined]
+                saver, exported = _seeded(temp_module.__name__)
+                _store_blob(saver, "t1", "note", [exported])
+
+                thread = _plan(saver, tmp_path, temp_module.__name__)
+
+                assert thread.status == "rewrite"
+
+        def when_a_pending_interrupt_holds_the_value():
+            def it_refuses_the_thread(tmp_path: Path, temp_module: types.ModuleType):
+                temp_module.Other = Other  # type: ignore[attr-defined]
+                saver = MemorySaver()
+                with _gone_module() as old:
+                    saver.serde = NamespaceAwareSerde(events=[Started, AskPriority])
+                    _ask.priority = old.Priority.HIGH
+                    EventGraph([_ask], checkpointer=saver).invoke(
+                        Started(), config=_cfg("t1")
+                    )
+                tup = saver.get_tuple(_cfg("t1"))
+                assert tup is not None
+                writes = saver.writes[
+                    ("t1", "", tup.config["configurable"]["checkpoint_id"])
+                ]
+                for key, (task, channel, _blob, path) in list(writes.items()):
+                    if channel == "__interrupt__":
+                        writes[key] = (
+                            task,
+                            channel,
+                            (
+                                "msgpack",
+                                ormsgpack.packb(
+                                    [
+                                        _ext(0, _GONE, "Priority", "high"),
+                                        _ext(0, temp_module.__name__, "Other", 1),
+                                    ],
+                                    option=_option,
+                                ),
+                            ),
+                            path,
+                        )
+
+                def graph(store_saver: BaseCheckpointSaver[Any]) -> EventGraph:
+                    store_saver.serde = NamespaceAwareSerde(
+                        _MOVES,
+                        events=[Started, AskPriority],
+                        allowed_msgpack_modules=[
+                            *_STRICT,
+                            (temp_module.__name__, "Other"),
+                        ],
+                    )
+                    return EventGraph([_ask], checkpointer=store_saver)
+
+                target = MigrationTarget(graph=graph, baseline=tmp_path / "b.json")
+                store = target.build(saver).store
+
+                thread = store.plan_rewrite(thread_ids=["t1"]).threads[0]
+
+                assert thread.status == "refused"
+                assert "the pending __interrupt__ write reads back" in thread.reason
+
     def when_a_retired_move_left_old_bytes():
         def it_reads_unchanged_and_names_the_value_in_the_output(tmp_path: Path):
             saver = MemorySaver()
@@ -955,7 +1105,8 @@ def describe_migration_gate():
 
     def when_a_healthy_class_cannot_take_a_placeholder():
         @pytest.mark.parametrize(
-            "value", [Validated, Exported, Dated, OptionalSeed, MatchingInit]
+            "value",
+            [Validated, Exported, Dated, OptionalSeed, MatchingInit, ForwardHint],
         )
         def it_reports_no_finding(value: type, tmp_path: Path):
             path = tmp_path / "b.json"

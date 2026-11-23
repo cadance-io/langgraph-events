@@ -5,6 +5,7 @@ identity. :func:`synthesize_legacy_payload` is the public byte assembly
 behind it.
 """
 
+import annotationlib
 import dataclasses
 import inspect
 import threading
@@ -92,7 +93,10 @@ def value_revival_failure(serde: NamespaceAwareSerde, live: type) -> str | None:
     if dataclasses.is_dataclass(live) and not _is_pydantic_model(live):
         stored = dict.fromkeys(f.name for f in dataclasses.fields(live))
         try:
-            inspect.signature(live).bind(**stored)
+            signature = inspect.signature(
+                live, annotation_format=annotationlib.Format.FORWARDREF
+            )
+            signature.bind(**stored)
         except TypeError as error:
             return (
                 f"LangGraph stores every field of {live.__qualname__} and passes "

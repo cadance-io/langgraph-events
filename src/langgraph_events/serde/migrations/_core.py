@@ -1809,11 +1809,31 @@ def _serde_event_classes(
     return out
 
 
-def _annotation_types(tp: object) -> Iterator[object]:
-    """*tp* and every type argument under it, depth first."""
+def _annotation_types(
+    tp: object, followed: frozenset[object] = frozenset()
+) -> Iterator[object]:
+    """*tp* and every type under it, depth first: each type argument, the
+    class of a generic alias, the value of a type alias, and the enum of a
+    ``Literal`` member. *followed* stops a recursive type alias. A name that
+    only ``TYPE_CHECKING`` imports stays an unresolved reference.
+    """
     yield tp
+    origin = typing.get_origin(tp)
+    if origin is typing.Literal:
+        members = typing.get_args(tp)
+        yield from dict.fromkeys(type(m) for m in members if isinstance(m, enum.Enum))
+        return
+    alias = origin if isinstance(origin, typing.TypeAliasType) else tp
+    if isinstance(alias, typing.TypeAliasType):
+        if alias not in followed:
+            value = annotationlib.call_evaluate_function(
+                alias.evaluate_value, annotationlib.Format.FORWARDREF
+            )
+            yield from _annotation_types(value, followed | {alias})
+    elif isinstance(origin, type):
+        yield origin
     for arg in typing.get_args(tp):
-        yield from _annotation_types(arg)
+        yield from _annotation_types(arg, followed)
 
 
 def _is_pydantic_model(tp: object) -> TypeGuard[type]:

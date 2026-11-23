@@ -337,7 +337,8 @@ def _names(tp: type, identity: tuple[str, str]) -> bool:
     """*identity* resolves to exactly *tp*, also through a re-export.
 
     A builtin is raw data. The check stops there, so a raw read never makes
-    a lookup from a stored name. The lookup imports nothing.
+    a lookup from a stored name. The lookup does not import *module*, but a
+    ``__getattr__`` of an imported module can run an import.
     """
     module, name = identity
     return (

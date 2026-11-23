@@ -506,7 +506,14 @@ def _verify_and_bump(
     for channel, value in checkpoint["channel_values"].items():
         where = f"channel {channel!r}"
         problem, identities = _verify_value(
-            serde, value, where, forbidden, historic, built, moved
+            serde,
+            value,
+            where,
+            forbidden,
+            historic,
+            built,
+            moved,
+            written=channel in changed,
         )
         if problem is not None:
             return problem, {}
@@ -519,7 +526,7 @@ def _verify_and_bump(
     for _task_id, channel, value in interrupt_writes:
         where = f"the pending {channel} write"
         problem, _identities = _verify_value(
-            serde, value, where, forbidden, historic, built, moved
+            serde, value, where, forbidden, historic, built, moved, written=True
         )
         if problem is not None:
             return problem, {}
@@ -651,6 +658,8 @@ def _verify_value(
     historic: set[tuple[str, str]],
     built: frozenset[int],
     moved: frozenset[tuple[str, str]],
+    *,
+    written: bool,
 ) -> tuple[str | None, list[tuple[str, str]]]:
     """Encode *value* the way ``put`` will, then prove the bytes name no
     dropped or historic identity and revive under the strict serde, and
@@ -661,10 +670,17 @@ def _verify_value(
     identities)``. *problem* is ``None`` when the value passed.
     *identities* lists every event identity the bytes hold and each value
     identity of *moved*, so the caller knows that the channel needs a write.
+
+    *written* is ``True`` when the value is stored for another reason. A
+    stored value must revive from its new bytes, whether its class is
+    recorded or not. The encode stores the live module of a class. An
+    allowlist that names only a re-export blocks that module, so the write
+    itself can lose the value. A value that is not written keeps its bytes.
     """
     from langgraph_events.serde._jsonplus import (  # noqa: PLC0415
         _scan_identities,
     )
+    from langgraph_events.serde._values import ValueRead  # noqa: PLC0415
 
     try:
         data = serde.dumps_typed(value)
@@ -688,7 +704,15 @@ def _verify_value(
                 [],
             )
     problem, reads = _revival_problem(serde, data, value, where, built)
-    return problem, [*identities, *sorted({r.resolved for r in reads} & moved)]
+    carried = [*identities, *sorted({r.resolved for r in reads} & moved)]
+    lost = _labels(r for r in reads if isinstance(r, ValueRead) and not r.revived)
+    if problem is None and lost and (written or carried):
+        problem = (
+            f"{', '.join(lost)} in {where} reads back as raw data after the "
+            f"write. Add each class at its live module to "
+            f"allowed_msgpack_modules, then rerun"
+        )
+    return problem, carried
 
 
 def _revival_problem(
