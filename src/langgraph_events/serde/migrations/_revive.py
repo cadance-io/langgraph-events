@@ -15,18 +15,15 @@ import ormsgpack
 
 # ``_option`` comes straight from its langgraph source (mypy treats
 # ``langgraph.*`` as untyped, so no strict ``no_implicit_reexport``
-# tripwire). ``EXT_NAMESPACE_AWARE_EVENT`` is defined in ``_jsonplus`` and
-# importing that module first means its LangGraph-drift smoke fence runs
-# before the line below, so the actionable error is still preserved.
+# tripwire). Importing ``_jsonplus`` first means its LangGraph-drift smoke
+# fence runs before the line below, so the actionable error is still preserved.
 from langgraph.checkpoint.serde.event_hooks import register_serde_event_listener
 from langgraph.checkpoint.serde.jsonplus import EXT_CONSTRUCTOR_KW_ARGS, _option
 
 from langgraph_events._event import Event
 from langgraph_events._identity import Identity
-from langgraph_events.serde._jsonplus import (
-    _UNEXPECTED_KWARG_RE,
-    EXT_NAMESPACE_AWARE_EVENT,
-)
+from langgraph_events.serde._ext_codes import EXT_NAMESPACE_AWARE_EVENT
+from langgraph_events.serde._jsonplus import _UNEXPECTED_KWARG_RE
 from langgraph_events.serde._values import _is_pydantic_model
 from langgraph_events.serde.migrations._core import (
     _resolve_identity,

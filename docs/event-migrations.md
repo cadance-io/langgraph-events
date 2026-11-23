@@ -442,16 +442,16 @@ A reached class must be bound at module level under its `__name__`, because Lang
 
 WARNING: `PostgresSaver` stores a bare `str`, `int`, `float` or `bool` subclass inline, with no class name. So a `StrEnum` alone in a channel reads back as a plain `str`, and no move applies to it. A `StrEnum` inside a list, a dataclass or an event keeps its identity.
 
-A rewrite never removes a class name from a stored channel, unless a declared migration removes it on purpose. A write that would do so is refused, for any class, recorded or not. The class can come from your app, a framework package or the standard library.
+A rewrite refuses to remove the name of a value that does not revive alone. A healthy value that a model coerces can lose its class name. The refusal applies to any class, recorded or not. The class can come from your app, a framework package or the standard library.
 
 A *damaged value* is a stored value with both of these facts:
 
 1. Its stored record does not revive alone.
-2. Its class name disappears when the revived value is encoded again.
+2. A new encoding of the revived value removes its class name or changes its stored payload.
 
-The first fact clears a healthy enum that a pydantic model coerces to `str`, for example with `use_enum_values=True`. The second fact clears a nested enum that reads as raw data alone and that its model rebuilds.
+The first fact clears a healthy enum that a pydantic model coerces to `str`, for example with `use_enum_values=True`. The second fact clears a nested enum that reads as raw data alone and that its model rebuilds. An enum whose `_missing_` returns a member revives alone, so it is not damaged. A `datetime` subclass is not judged, because LangGraph reads it only as an ISO string.
 
-The check judges each stored value before any event migration runs, so a transform cannot hide a damaged value. It encodes the revived value, compares the class names with the stored names, then reads the new bytes again. A name that returns under another module is a re-export, and it is not damaged when the allowlist admits the new name. A healthy value that a migration removes is not damaged. A value inside an event of `drop=` is not judged.
+The check judges each stored value before any event migration runs, so a transform cannot hide a damaged value. It encodes the revived value, compares the class names and payloads with the stored records, then reads the new bytes again. A name that returns under another module is a re-export, and it is not damaged when the allowlist admits the new name. A healthy value that a migration removes is not damaged. A value inside an event of `drop=` is not judged.
 
 WARNING: a migration that deletes, replaces, copies or wraps a damaged value is refused while the class or member stays deleted. To remove such a value, follow [Removing a damaged value on purpose](#removing-a-damaged-value-on-purpose).
 

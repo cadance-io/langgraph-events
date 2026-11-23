@@ -41,7 +41,9 @@ from langgraph_events import (
     EventTopology,
     IntegrationEvent,
     Interrupted,
+    RewriteReport,
     ScalarReducer,
+    ThreadRewrite,
     on,
 )
 from langgraph_events.serde import (
@@ -2061,6 +2063,36 @@ class Stamp(datetime):
     pass
 
 
+class Stamped(pydantic.BaseModel):
+    at: datetime
+
+
+class ValidatorDefault(pydantic.BaseModel):
+    priority: Priority = Priority.LOW
+
+    @pydantic.field_validator("priority", mode="before")
+    @classmethod
+    def _known_or_low(cls, value: object) -> object:
+        return value if value in tuple(Priority) else Priority.LOW
+
+
+@dataclass
+class PostInitDefault:
+    priority: Any = Priority.LOW
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.priority, Priority):
+            self.priority = Priority.LOW
+
+
+class SelfHealing(enum.Enum):
+    KNOWN = "known"
+
+    @classmethod
+    def _missing_(cls, value: object) -> SelfHealing:
+        return cls.KNOWN
+
+
 def describe_the_loss_test():
     def when_a_model_coerces_a_healthy_enum():
         @pytest.mark.parametrize(
@@ -2102,11 +2134,43 @@ def describe_the_loss_test():
         def it_refuses_the_thread(tmp_path: Path, record: ormsgpack.Ext):
             assert _value_thread(tmp_path, record).status == "refused"
 
-    def when_a_method_record_does_not_revive():
-        def it_refuses_the_thread(tmp_path: Path):
-            record = _named(3, _HERE, "Stamp", "2026-01-01T00:00:00", "fromisoformat")
+    def when_a_typed_field_holds_a_datetime_subclass():
+        def it_plans_a_rewrite(tmp_path: Path):
+            stamp = _named(3, _HERE, "Stamp", "2026-01-01T00:00:00", "fromisoformat")
+            record = _named(5, _HERE, "Stamped", {"at": stamp}, "model_validate_json")
 
-            assert _value_thread(tmp_path, record).status == "refused"
+            thread = _value_thread(tmp_path, record)
+
+            assert (thread.status, thread.lost_values) == ("rewrite", ())
+
+    def when_a_class_defaults_a_deleted_member():
+        @pytest.mark.parametrize(
+            "record",
+            [
+                _named(
+                    5,
+                    _HERE,
+                    "ValidatorDefault",
+                    {"priority": _LOST_MEMBER},
+                    "model_validate_json",
+                ),
+                _named(2, _HERE, "PostInitDefault", {"priority": _LOST_MEMBER}),
+            ],
+            ids=["field_validator", "post_init"],
+        )
+        def it_refuses_the_thread(tmp_path: Path, record: ormsgpack.Ext):
+            thread = _value_thread(tmp_path, record)
+
+            assert (thread.status, thread.lost_values) == (
+                "refused",
+                (f"{_HERE}:Priority",),
+            )
+
+    def when_an_enum_revives_a_deleted_member_through_missing():
+        def it_plans_a_rewrite(tmp_path: Path):
+            thread = _value_thread(tmp_path, _named(0, _HERE, "SelfHealing", "gone"))
+
+            assert (thread.status, thread.lost_values) == ("rewrite", ())
 
     def when_a_framework_value_is_healthy():
         @pytest.mark.parametrize(
@@ -2164,6 +2228,15 @@ def describe_the_loss_test():
 
             assert rendered.count(f"{_HERE}:Priority") == 1
             assert "Removing a damaged value on purpose" in rendered
+
+        def it_prints_no_raw_data_line_for_a_name_outside_the_reason():
+            thread = ThreadRewrite(
+                "t1", "refused", reason="history refused", lost_values=("m:Gone",)
+            )
+
+            rendered = str(RewriteReport(applied=False, threads=(thread,)))
+
+            assert "reads as raw data" not in rendered
 
 
 def _tone_graph(*tones: type) -> Any:

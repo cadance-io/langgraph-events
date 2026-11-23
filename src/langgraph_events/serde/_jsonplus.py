@@ -21,6 +21,12 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import ormsgpack
 from langgraph.types import Interrupt
 
+from langgraph_events.serde._ext_codes import (
+    EXT_FOLD_CONTRIBUTIONS,
+    EXT_INTERRUPT,
+    EXT_NAMESPACE_AWARE_EVENT,
+)
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
 
@@ -58,28 +64,16 @@ if not hasattr(JsonPlusSerializer(), "_unpack_ext_hook"):  # pragma: no cover
         "or open an issue against langgraph-events."
     )
 
-# Unique among LangGraph's existing ext codes (currently 0..6).
-EXT_NAMESPACE_AWARE_EVENT = 100
-# Dedicated code so we can recurse via our own ``_default`` when re-encoding
-# the wrapped value — LangGraph's generic dataclass path uses ``_msgpack_enc``
-# which is hardcoded to ``default=_msgpack_default`` and would bypass us.
-EXT_INTERRUPT = 101
-# A ``FoldReducer`` channel write. LangGraph stores it as a pending write when
-# a sibling task interrupts or fails in the same superstep. Upstream's
-# dataclass path would encode its events by ``__name__``, so a nested event
-# would not revive.
-EXT_FOLD_CONTRIBUTIONS = 102
-
 # The dataclass ``TypeError`` for a kwarg the class does not declare.
 # ``_revival_remedy`` and the revive gate's failure hint both read the
 # field name out of it.
 _UNEXPECTED_KWARG_RE = re.compile(r"unexpected keyword argument '(\w+)'")
 
-# Imported AFTER the EXT constants, ``_UNEXPECTED_KWARG_RE`` and ``_option``
-# are bound: ``_core`` pulls in the ``serde.migrations`` package whose
-# ``__init__`` re-exports ``testing``, which imports those names back from
-# this module. Defining them first lets that re-entry resolve against a
-# partially-initialized ``_jsonplus`` without a circular import.
+# Imported AFTER ``_UNEXPECTED_KWARG_RE`` and ``_option`` are bound: ``_core``
+# pulls in the ``serde.migrations`` package whose ``__init__`` re-exports
+# ``testing``, which imports those names back from this module. Defining them
+# first lets that re-entry resolve against a partially-initialized
+# ``_jsonplus`` without a circular import.
 from langgraph_events._identity import Identity  # noqa: E402
 from langgraph_events.serde._framework import FRAMEWORK_MIGRATIONS  # noqa: E402
 from langgraph_events.serde._values import (  # noqa: E402

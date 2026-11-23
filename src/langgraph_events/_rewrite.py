@@ -79,12 +79,12 @@ class ThreadRewrite:
 
     @property
     def lost_values_line(self) -> str | None:
-        """The report line of each lost value that ``reason`` does not name."""
-        named = set((self.reason or "").replace(",", " ").split())
-        rest = [label for label in self.lost_values if label not in named]
-        if not rest:
+        """The report line of the lost values. A refused thread has none,
+        because its ``reason`` states the refusal."""
+        if self.status == "refused" or not self.lost_values:
             return None
-        return f"  {self.thread_id}: reads as raw data: {', '.join(rest)}"
+        labels = ", ".join(self.lost_values)
+        return f"  {self.thread_id}: reads as raw data: {labels}"
 
 
 @dataclass(frozen=True)
@@ -238,8 +238,9 @@ def _written_loss(
         if labels:
             return (
                 f"{', '.join(labels)} in {place} reads back as raw data, so the "
-                f"write removes the class name. Fix the class or add its live "
-                f"module to allowed_msgpack_modules, then rerun. To remove the "
+                f"write removes the class name or changes the value. Fix the "
+                f"class or add its live module to allowed_msgpack_modules, then "
+                f"rerun. To remove the "
                 f"value, see 'Removing a damaged value on purpose' in "
                 f"docs/event-migrations.md"
             )

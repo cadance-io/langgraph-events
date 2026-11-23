@@ -22,14 +22,13 @@ from langgraph.checkpoint.serde.jsonplus import (
     EXT_CONSTRUCTOR_KW_ARGS,
     EXT_CONSTRUCTOR_POS_ARGS,
     EXT_CONSTRUCTOR_SINGLE_ARG,
-    EXT_METHOD_SINGLE_ARG,
     EXT_PYDANTIC_V1,
     EXT_PYDANTIC_V2,
     _option,
 )
 
 from langgraph_events._event import Event, Namespace
-from langgraph_events.serde._jsonplus import EXT_NAMESPACE_AWARE_EVENT
+from langgraph_events.serde._ext_codes import EXT_NAMESPACE_AWARE_EVENT
 from langgraph_events.serde.migrations._core import (
     _VALUE_SOURCES_ATTR,
     Migration,
@@ -47,13 +46,14 @@ _NAMED_RECORD_CODES = frozenset(
         EXT_CONSTRUCTOR_SINGLE_ARG,
         EXT_CONSTRUCTOR_POS_ARGS,
         EXT_CONSTRUCTOR_KW_ARGS,
-        EXT_METHOD_SINGLE_ARG,
         EXT_PYDANTIC_V1,
         EXT_PYDANTIC_V2,
         EXT_NAMESPACE_AWARE_EVENT,
     }
 )
-"""The ext codes whose payload starts ``[module, name, ...]``."""
+"""The ext codes whose payload starts ``[module, name, ...]`` and whose name
+can revive a class. A method record is absent: LangGraph allows only
+``datetime.datetime.fromisoformat``, so a subclass name holds no fact."""
 
 _RAW_DATA_TYPES = (dict, list, str, int, float, bool, bytes, type(None))
 """The types that LangGraph returns for a record that it cannot revive."""
@@ -362,9 +362,10 @@ class ValueReader:
         encode: Callable[[object], tuple[str, bytes]],
     ) -> tuple[tuple[str, str], ...]:
         """Each name of *met* that is lost. A loss needs two facts: a write
-        of *value* removes the name, and the stored record does not revive
-        alone. So a healthy enum that a model coerces to ``str`` is no loss,
-        and neither is a raw enum that its model restores.
+        of *value* removes the name or changes its stored payload, and the
+        stored record does not revive alone. So a healthy enum that a model
+        coerces to ``str`` is no loss, and neither is a raw enum that its
+        model rebuilds.
 
         A second read proves that the allowlist admits a name the write
         changed, for example the defining module of a re-export.
@@ -376,8 +377,18 @@ class ValueReader:
             kind, written = encode(value)
             if kind != "msgpack":
                 return tuple(names.values())
-            after = self.names(written)
-            if after == Counter(read.resolved for read in met):
+            rewritten: list[ValueRead] = []
+            self._relabel(-1, written, rewritten)
+            after = Counter(read.resolved for read in rewritten)
+            kept = {(read.resolved, read.source[1]) for read in rewritten}
+            gone = stored - after
+            changed = [
+                (name, read)
+                for name, read in defined
+                if name in gone
+                or (name == read.resolved and (name, read.source[1]) not in kept)
+            ]
+            if not changed and after == Counter(read.resolved for read in met):
                 return ()
             again = ormsgpack.unpackb(
                 written, ext_hook=fallback, option=ormsgpack.OPT_NON_STR_KEYS
@@ -385,12 +396,11 @@ class ValueReader:
             second = self.names(encode(again)[1])
         except ValueError, TypeError:
             return tuple(names.values())
-        gone = stored - after
         return (
             *(
                 read.resolved
-                for name, read in defined
-                if name in gone and not _revives_alone(read, name, fallback)
+                for name, read in changed
+                if not _revives_alone(read, name, fallback)
             ),
             *(after - second).elements(),
         )
