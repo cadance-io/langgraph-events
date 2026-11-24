@@ -216,7 +216,7 @@ def describe_check():
                 (finding,) = check(target).findings
 
                 assert finding == BaselineStale(
-                    ("~ version 3 -> 5",), (), records_no_values=True
+                    ("~ version 3 -> 5",), (), values_unrecorded=True
                 )
 
         def when_the_baseline_records_no_value_class():

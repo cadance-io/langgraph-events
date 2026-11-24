@@ -780,10 +780,10 @@ def _revival_problem(
     if unsettled:
         return (
             f"a migration of {', '.join(unsettled)} does not settle: a read of "
-            f"the rewritten value in {where} changes it again. A class-stage "
-            f"transform must return the payload that the live class writes "
-            f"back. Do not remove a field of the live class. Set it to a value "
-            f"instead, then rerun"
+            f"the rewritten value in {where} changes it again. Make each "
+            f"class-stage transform return its own output unchanged. Do not "
+            f"remove a field of the live class. Set it to a value instead, "
+            f"then rerun"
         )
     invalid = _invalid_model(value, "", built, inside=False)
     if invalid is None:

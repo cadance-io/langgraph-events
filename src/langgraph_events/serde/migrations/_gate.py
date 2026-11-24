@@ -113,14 +113,15 @@ class BaselineStale:
     ``changed`` pairs each deleted key with a new key of the code of the
     same kind on the same identity: the key of one migration can have
     changed, for example when a factory argument changed.
-    ``records_no_values`` is true for a committed file of version 1 to 4.
+    ``values_unrecorded`` is true for a committed file of version 1 to 4,
+    which never recorded values. A version 5 file with an empty list is false.
     """
 
     code: ClassVar[str] = "baseline-stale"
     changes: tuple[str, ...]
     deleted: tuple[MigrationKey, ...]
     changed: tuple[tuple[MigrationKey, MigrationKey], ...] = ()
-    records_no_values: bool = False
+    values_unrecorded: bool = False
 
     @property
     def subject(self) -> str:
@@ -135,7 +136,7 @@ class BaselineStale:
                 "The committed baseline records no value class, so run this "
                 "update on code that moves no value class.",
             )
-            if self.records_no_values
+            if self.values_unrecorded
             else ()
         )
         if not self.deleted:
@@ -483,7 +484,7 @@ def check(target: MigrationTarget, *, previous: Path | None = None) -> GateRepor
                 committed.changes_to(want),
                 deleted,
                 _changed(deleted, committed, code),
-                records_no_values=isinstance(committed.values, ValuesUnrecorded),
+                values_unrecorded=isinstance(committed.values, ValuesUnrecorded),
             )
         )
     findings.extend(
