@@ -449,7 +449,7 @@ A *damaged value* is a stored value with both of these facts:
 1. Its stored record does not revive alone.
 2. A new encoding of the revived value removes its class name or changes its stored payload.
 
-The first fact clears a healthy enum that a pydantic model coerces to `str`, for example with `use_enum_values=True`. The second fact clears a nested enum that reads as raw data alone and that its model rebuilds. An enum whose `_missing_` returns a member revives alone, so it is not damaged. A `datetime` subclass is not judged, because LangGraph reads it only as an ISO string.
+The first fact clears a healthy enum that a pydantic model coerces to `str`, for example with `use_enum_values=True`. The second fact clears a nested enum that reads as raw data alone and that its model rebuilds. A module-level enum that the allowlist admits, and whose `_missing_` returns a member, revives alone, so it is not damaged. A `datetime` subclass is not judged, because LangGraph reads it only as an ISO string.
 
 The check judges each stored value before any event migration runs, so a transform cannot hide a damaged value. It encodes the revived value, compares the class names and payloads with the stored records, then reads the new bytes again. A name that returns under another module is a re-export, and it is not damaged when the allowlist admits the new name. A healthy value that a migration removes is not damaged. A value inside an event of `drop=` is not judged.
 

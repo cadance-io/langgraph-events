@@ -2166,6 +2166,40 @@ def describe_the_loss_test():
                 (f"{_HERE}:Priority",),
             )
 
+        def when_the_member_is_stored_at_a_re_export():
+            @pytest.mark.parametrize(
+                "build",
+                [
+                    lambda member: _named(
+                        5,
+                        _HERE,
+                        "ValidatorDefault",
+                        {"priority": member},
+                        "model_validate_json",
+                    ),
+                    lambda member: _named(
+                        2, _HERE, "PostInitDefault", {"priority": member}
+                    ),
+                ],
+                ids=["field_validator", "post_init"],
+            )
+            def it_refuses_the_thread_and_keeps_the_bytes(
+                tmp_path: Path, temp_module: types.ModuleType, build: Any
+            ):
+                temp_module.Priority = Priority  # type: ignore[attr-defined]
+                old = _ext(0, temp_module.__name__, "Priority", "no")
+                saver = _log_saver(_event(HoldsAny, moved=_moved(), value=build(old)))
+                before = _memory_blob(saver, "t1", "events")
+
+                report = _log_store(saver, tmp_path).rewrite_store(thread_ids=["t1"])
+
+                thread = report.threads[0]
+                assert (thread.status, thread.lost_values) == (
+                    "refused",
+                    (f"{temp_module.__name__}:Priority",),
+                )
+                assert _memory_blob(saver, "t1", "events") == before
+
     def when_an_enum_revives_a_deleted_member_through_missing():
         def it_plans_a_rewrite(tmp_path: Path):
             thread = _value_thread(tmp_path, _named(0, _HERE, "SelfHealing", "gone"))

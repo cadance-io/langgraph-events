@@ -380,13 +380,12 @@ class ValueReader:
             rewritten: list[ValueRead] = []
             self._relabel(-1, written, rewritten)
             after = Counter(read.resolved for read in rewritten)
-            kept = {(read.resolved, read.source[1]) for read in rewritten}
+            kept = {(read.resolved, _stored_body(read)) for read in rewritten}
             gone = stored - after
             changed = [
                 (name, read)
                 for name, read in defined
-                if name in gone
-                or (name == read.resolved and (name, read.source[1]) not in kept)
+                if name in gone or (name, _stored_body(read)) not in kept
             ]
             if not changed and after == Counter(read.resolved for read in met):
                 return ()
@@ -431,6 +430,14 @@ class ValueReader:
         if identity is not None and resolved is not None:
             met.append(ValueRead(identity, resolved, (code, payload)))
         return payload
+
+
+def _stored_body(read: ValueRead) -> bytes:
+    """The stored record of *read* without its ``module`` and ``name``."""
+    record = ormsgpack.unpackb(
+        read.source[1], ext_hook=ormsgpack.Ext, option=ormsgpack.OPT_NON_STR_KEYS
+    )
+    return ormsgpack.packb(record[2:], option=_option)
 
 
 def _revives_alone(
