@@ -175,7 +175,7 @@ The read path runs the origin stage (transform, then origin fills), the rename, 
 
 - **Replace, not merge.** The return value is the full kwargs the constructor receives. Return `kw` after an edit in place, or return a new dict. A transform that returns `{}` discards every stored field.
 - **A stable name.** Give the transform a function name at module level, or build it with a factory or `functools.partial`. See [Labels](migration-gate.md#labels) for the key of a local function or a partial. The [migration gate](migration-gate.md#the-rules) reports a lambda, a callable object, or a local function that captures a value with no stable form as `AnonymousCallable`.
-- **Idempotent.** A class-stage transform sees current payloads for ever, so it must accept a payload from every era. Use `kw.pop("x", None)`, not `del kw["x"]` or `kw["x"]`.
+- **Idempotent.** A class-stage transform sees current payloads for ever, so it must accept a payload from every era. Use `kw.pop("x", None)`, not `del kw["x"]` or `kw["x"]`. Do not pop a field that the live class still has. The rewrite writes that field back, and the plan then refuses the thread with `does not settle`. Set the field to its new value instead.
 - **One transform per identity and stage.** Compose the steps in one callable. A second decorator is rejected at decoration. A second hand-authored operation is rejected at serde construction.
 - **The target must resolve**, live or as a rename source, the same rule as `AddField`.
 - **A transform that raises, or returns a non-dict,** fails the read with `Cannot revive <stored identity>: TransformFields raised <Type>: <message>` and a remedy. Under `serde.tolerate_unresolved()` the identity degrades to `UnrevivedIdentity` and is collected, so `unrevivable_threads()` reports it.
@@ -429,8 +429,10 @@ class Currency(StrEnum):  # the class now lives in shop.money
 
 1. Run `baseline update`. The baseline records each value class in `values`, and the key `move shop.old_types:Currency` in `migrations`.
 2. Deploy. The serde reads the old identity as the new one, at any depth, before LangGraph applies its allowlist. So `allowed_msgpack_modules` names the new module only.
+
+    LangGraph logs `Deserializing unregistered type <module>.<Name>` for each value class that its allowlist does not name. The read still revives the class. With `LANGGRAPH_STRICT_MSGPACK=true`, LangGraph blocks the class and logs `Blocked deserialization of <module>.<Name>`. The value then reads as raw data. `topology.serde()` and `from_namespaces` take no allowlist. To allow the class, set `saver.serde = topology.serde().with_msgpack_allowlist([Currency])`, then build the graph with `EventGraph.of(topology, checkpointer=saver)`. In the default mode this call changes nothing, because LangGraph allows every class. A hand-built `NamespaceAwareSerde` takes `allowed_msgpack_modules=` directly.
 3. Run `rewrite --apply --expect <fingerprint>`. An aliased read is a change, so the rewrite stores the new module, also in a channel that holds a value and no event.
-4. In the next release, `survived-release` refuses the deploy until you delete the decorator.
+4. In the next release, `check --previous` reports `survived-release` until you delete the decorator.
 
 Pass `name=` when the class was also renamed: `@migrate_value_from("shop.old_types", name="Money")`. For a composite migration, use the raw operation: `Migration((MoveValue("shop.old_types", "Money", Currency),))`. The decorator raises `TypeError` on an `Event`. Use `@migrate_from` for an event class.
 
@@ -457,7 +459,7 @@ WARNING: a migration that deletes, replaces, copies or wraps a damaged value is 
 
 WARNING: a refused thread makes the [`rewrite` plan of the deploy](migration-gate.md#a-checkpoint-that-a-plan-refuses) exit 1, so an old damaged value in a written channel can stop a deploy. Fix the class or add its live module to `allowed_msgpack_modules`, then rerun.
 
-A write stores the live module of a class. WARNING: when `allowed_msgpack_modules` names only a re-export, the new bytes are blocked, and the next read returns raw data. So the rewrite refuses a thread when a value in a channel that it writes does not revive from the new bytes, also for a class that is not recorded. Add the live module to the allowlist, then rerun. A channel that the rewrite does not write keeps its bytes and is not refused. A saver that stores the checkpoint in one blob, such as `SqliteSaver`, writes every channel, so the check covers every channel of that saver.
+A write stores the live module of a class. WARNING: when `allowed_msgpack_modules` names only a re-export, the new bytes are blocked, and the next read returns raw data. So the rewrite refuses a thread when a value in a channel that it writes does not revive from the new bytes, also for a class that is not recorded. Add the live module to the allowlist, then rerun. A channel that the rewrite does not write keeps its bytes and is not refused. A saver that stores the checkpoint in one blob, such as `SqliteSaver`, writes every channel of a thread that the rewrite writes. A thread that needs no write is not checked. It stays `unchanged`, and the report names the damaged value under `reads as raw data`.
 
 Known limit, unchanged by this check: a normal run or resume of a thread stores a damaged value as `None` or as raw data. The check covers only a rewrite. Fix the class or the allowlist before you resume a thread that holds a damaged value.
 
@@ -477,8 +479,7 @@ Release 1 brings back the member and declares the transform:
 from enum import Enum
 
 from langgraph_events import IntegrationEvent
-from langgraph_events.serde import NamespaceAwareSerde
-from langgraph_events.serde.migrations import Migration
+from langgraph_events.serde import transform_fields
 
 
 class Color(Enum):
@@ -486,25 +487,22 @@ class Color(Enum):
     BLUE = "blue"  # brought back for one release
 
 
-class Painted(IntegrationEvent):
-    color: Color | None = None
-    note: str = ""
-
-
 def clear_blue(fields: dict[str, object]) -> dict[str, object]:
     color = fields.get("color")
     return {**fields, "color": None if color is Color.BLUE else color}
 
 
-serde = NamespaceAwareSerde(
-    [Migration.transform_fields(target=Painted, transform=clear_blue)],
-    events=[Painted],
-)
+@transform_fields(clear_blue)
+class Painted(IntegrationEvent):
+    color: Color | None = None
+    note: str = ""
 ```
+
+Put `@transform_fields(...)` on each event class that stores the value. This form also works with `from_namespaces`, because the serde collects the decorator. The new value must be valid for the field. To store `None`, type the field `Color | None` and give it a default. For a hand-built serde, `Migration.transform_fields(target=Painted, transform=clear_blue)` in `migrations=` is the same operation.
 
 1. Deploy release 1, then run `rewrite --apply --expect <fingerprint>`. The value is healthy when the transform removes it, so the check accepts the write.
 2. If a reducer channel holds the value, rebuild that channel before release 2. The rewrite does not recompute a reducer.
-3. In release 2, delete `BLUE` and the transform, then run `baseline update --previous <file>`. The thread reads `None` in `color` and keeps `note`.
+3. In release 2, delete `BLUE` and the transform, then run `baseline update --previous <file>`. The thread reads `None` in `color` and keeps `note`. For a deleted member, the recipe ends here. The class keeps its `values` entry.
 4. If you deleted a whole class, `check` now reports `uncovered-value`, because `values` is cumulative. Delete the entry of the class from `values` in the baseline file by hand, as for a tombstone. No command removes it. The gate then passes.
 
 A transform reaches only an event. To clear a channel that a reducer derives from events, replay the reducer while the member is back, and store the result:

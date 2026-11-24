@@ -726,8 +726,9 @@ def describe_rewrite_command():
                     f"  t1: refused, a migration of {_Counted.__module__}:"
                     f"{_Counted.__qualname__} does not settle: a read of the "
                     f"rewritten value in channel 'events' changes it again. "
-                    f"Make each class-stage transform return its own output "
-                    f"unchanged, then rerun"
+                    f"A class-stage transform must return the payload that the "
+                    f"live class writes back. Do not remove a field of the live "
+                    f"class. Set it to a value instead, then rerun"
                 )
 
         def when_the_running_release_is_not_the_expected_one():

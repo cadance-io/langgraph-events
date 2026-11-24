@@ -992,7 +992,11 @@ def describe_rewrite_live_set():
             assert [t.status for t in outcome.final.threads] == ["unchanged"]
             assert outcome.clean
             rendered = outcome.render(Invocation("app:target"), "fingerprint")
-            assert f"t1: reads as raw data: {_GONE}:" in rendered
+            (line,) = [x for x in rendered.splitlines() if "reads as raw data" in x]
+            assert line.startswith(f"  t1: reads as raw data: {_GONE}:")
+            assert line.endswith(
+                ". To remove it, follow 'Removing a damaged value on purpose'."
+            )
 
     def when_a_completed_task_write_holds_a_moved_value():
         def it_refuses_the_thread(tmp_path: Path):
@@ -2301,9 +2305,15 @@ def describe_a_deleted_value_class():
             assert [i.label for i in finding.moved_to] == [
                 f"{temp_module.__name__}:Tone"
             ]
-            lines = " ".join(finding.lines(Invocation("app:target")))
-            assert "Removing a damaged value on purpose" in lines
-            assert '"values"' in lines
+            lines = finding.lines(Invocation("app:target"))
+            moved = next(i for i, x in enumerate(lines) if "If the class moved" in x)
+            deleted = next(i for i, x in enumerate(lines) if "If you deleted" in x)
+            assert moved < deleted
+            assert lines[deleted] == (
+                "If you deleted the class on purpose, follow 'Removing a damaged "
+                "value on purpose' in the Event migrations guide. Then delete this "
+                'entry from "values" in the baseline file.'
+            )
 
     def when_the_whole_recipe_runs():
         def it_ends_on_a_passing_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

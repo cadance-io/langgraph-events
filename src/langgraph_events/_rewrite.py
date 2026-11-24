@@ -84,7 +84,10 @@ class ThreadRewrite:
         if self.status == "refused" or not self.lost_values:
             return None
         labels = ", ".join(self.lost_values)
-        return f"  {self.thread_id}: reads as raw data: {labels}"
+        return (
+            f"  {self.thread_id}: reads as raw data: {labels}. To remove it, "
+            f"follow 'Removing a damaged value on purpose'."
+        )
 
 
 @dataclass(frozen=True)
@@ -777,8 +780,10 @@ def _revival_problem(
     if unsettled:
         return (
             f"a migration of {', '.join(unsettled)} does not settle: a read of "
-            f"the rewritten value in {where} changes it again. Make each "
-            f"class-stage transform return its own output unchanged, then rerun"
+            f"the rewritten value in {where} changes it again. A class-stage "
+            f"transform must return the payload that the live class writes "
+            f"back. Do not remove a field of the live class. Set it to a value "
+            f"instead, then rerun"
         )
     invalid = _invalid_model(value, "", built, inside=False)
     if invalid is None:

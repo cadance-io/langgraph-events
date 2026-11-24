@@ -156,9 +156,9 @@ The removed form `python -m langgraph_events.serde.migrations <module:factory> <
 | `retired` | Every identity an update dropped from `events`, with the fields last recorded for it. No `fields` key when the last record predates version 3. An identity that is live again leaves `retired`. A retired identity must revive through a migration onto a surviving class or a tombstone |
 | `handlers` | The handler node names. An update rebuilds it. `EventGraph.resumable_node_names` returns each handler node name and each `@on(previously=...)` alias |
 | `migrations` | The label of every migration of your own that the code holds, and any hold. The framework migrations of the library are not in it |
-| `values` | Each value class that a checkpoint can store by name. Cumulative. It holds names and no shape, so a deleted enum member passes `check`. The `rewrite` plan sees that member |
+| `values` | Each value class that a checkpoint can store by name. Cumulative. It holds names and no shape, so a deleted enum member passes `check`. The `rewrite` plan names a thread that holds the member under `reads as raw data`. The plan does not fail, and its verdict can stay `clean` |
 
-`events` and `retired` never share an identity. The reader raises `ValueError` on an overlap. A file of version 1, 2, 3 or 4 still loads. A file with an unknown version raises `ValueError`. The next `baseline update` writes version 5. A move that the previous release shipped and the code dropped removes its source. A file of version 1 to 4 recorded no values, so the gate judges only the classes that the code reaches.
+`events` and `retired` never share an identity. The reader raises `ValueError` on an overlap. A file of version 1, 2, 3 or 4 still loads. A file with an unknown version raises `ValueError`. The next `baseline update` writes version 5. A move that the previous release shipped and the code dropped removes its source. A file of version 1 to 4 recorded no values. So the gate cannot see a value class that moved before the first version 5 baseline. Write the version 5 baseline on the old code first.
 
 ## Lifecycle of a read-time migration
 

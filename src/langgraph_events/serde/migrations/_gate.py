@@ -113,12 +113,14 @@ class BaselineStale:
     ``changed`` pairs each deleted key with a new key of the code of the
     same kind on the same identity: the key of one migration can have
     changed, for example when a factory argument changed.
+    ``records_no_values`` is true for a committed file of version 1 to 4.
     """
 
     code: ClassVar[str] = "baseline-stale"
     changes: tuple[str, ...]
     deleted: tuple[MigrationKey, ...]
     changed: tuple[tuple[MigrationKey, MigrationKey], ...] = ()
+    records_no_values: bool = False
 
     @property
     def subject(self) -> str:
@@ -128,8 +130,21 @@ class BaselineStale:
         """The explanation, the differences, then the next command."""
         explanation = ("The baseline does not match the code:",)
         changes = tuple(f"  {change}" for change in self.changes)
+        values = (
+            (
+                "The committed baseline records no value class, so run this "
+                "update on code that moves no value class.",
+            )
+            if self.records_no_values
+            else ()
+        )
         if not self.deleted:
-            return (*explanation, *changes, f"Run: {invocation.baseline_update()}")
+            return (
+                *explanation,
+                *changes,
+                *values,
+                f"Run: {invocation.baseline_update()}",
+            )
         changed = tuple(
             f"{old.label} and {new.label} are of the same kind on the same "
             f"event, so the key of one migration can have changed. The history "
@@ -142,6 +157,7 @@ class BaselineStale:
             *changed,
             "A migration left the code. When the previous release shipped it, "
             "the update with --previous drops the history it covered.",
+            *values,
             f"Run: {invocation.baseline_update(prune=True)}",
         )
 
@@ -259,26 +275,29 @@ class UncoveredValue:
         return self.identity.label
 
     def lines(self, invocation: Invocation) -> tuple[str, ...]:
-        """The explanation, each remedy, then the next command."""
-        hint = (
-            (
-                "A class with the same name lives at "
-                f"{', '.join(i.label for i in self.moved_to)}.",
-            )
-            if self.moved_to
-            else ()
-        )
-        return (
-            "No class defined at this identity and no move covers it, so a "
-            "stored value of it reads back as raw data.",
-            *hint,
+        """The explanation, then each remedy. A class with the same name
+        elsewhere puts the move first."""
+        deleted = (
             "If you deleted the class on purpose, follow 'Removing a damaged "
-            "value on purpose' in docs/event-migrations.md. Then delete this "
-            'entry from "values" in the baseline file.',
+            "value on purpose' in the Event migrations guide. Then delete this "
+            'entry from "values" in the baseline file.'
+        )
+        moved = (
             f"If the class moved, add @migrate_value_from("
             f"{self.identity.module!r}) to the class that replaces it, then "
-            f"run: {invocation.baseline_update()}",
+            f"run: {invocation.baseline_update()}"
         )
+        explanation = (
+            "No class defined at this identity and no move covers it, so a "
+            "stored value of it reads back as raw data."
+        )
+        if self.moved_to:
+            hint = (
+                "A class with the same name lives at "
+                f"{', '.join(i.label for i in self.moved_to)}."
+            )
+            return (explanation, hint, moved, deleted)
+        return (explanation, deleted, moved)
 
 
 @dataclass(frozen=True)
@@ -461,7 +480,10 @@ def check(target: MigrationTarget, *, previous: Path | None = None) -> GateRepor
         deleted = _deleted(committed, code)
         findings.append(
             BaselineStale(
-                committed.changes_to(want), deleted, _changed(deleted, committed, code)
+                committed.changes_to(want),
+                deleted,
+                _changed(deleted, committed, code),
+                records_no_values=isinstance(committed.values, ValuesUnrecorded),
             )
         )
     findings.extend(

@@ -1213,8 +1213,10 @@ def describe_rewrite_store_refusals():
 
             assert thread.reason == (
                 f"a migration of {_identity(held)} does not settle: a read of the "
-                f"rewritten value in channel 'events' changes it again. Make each "
-                f"class-stage transform return its own output unchanged, then rerun"
+                f"rewritten value in channel 'events' changes it again. A "
+                f"class-stage transform must return the payload that the live "
+                f"class writes back. Do not remove a field of the live class. Set "
+                f"it to a value instead, then rerun"
             )
             assert saver.blobs == blobs
 

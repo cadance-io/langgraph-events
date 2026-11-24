@@ -128,7 +128,7 @@ The return value is checked against the declared annotation, or against the subs
 | Export | Type | Description |
 |---|---|---|
 | `Reducer[E, T]` | Class | List accumulator that stores `list[T]`. Declare it as a `Namespace` class attribute or pass it through `reducers=`. Construct it subscripted: `Reducer[E, T](...)`. See [Declared types](reducers.md#declared-types) |
-| `ScalarReducer[E, T]` | Class | Last-write-wins for a single value of type `T`. `None` is valid. Construct it subscripted |
+| `ScalarReducer[E, T]` | Class | Last-write-wins for a single value of type `T`. `None` is valid. Construct it subscripted. Declare `T` without `None`. With `default=None` the stored type is `T \| None` |
 | `FoldReducer[S, E]` | Class | Folds each event into accumulating state through `fold(self, state)`. The next value depends on the prior value. Construct it subscripted with the state type `S`. The optional second argument `E` types `event_type` and the event of an explicit `fold=`, and defaults to `Foldable`. An event with no `fold` method needs `E` |
 | `Foldable` | Protocol | `@runtime_checkable` structural type for an event with a `fold` method. The default event type `E` of `FoldReducer`. Do not inherit it |
 | `BaseReducer` | Class | Abstract base for a custom reducer. Subclass it for a bespoke channel, and implement `stored_type()` |
