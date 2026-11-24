@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.57.0] - 2026-11-24
+
 ### Breaking
 
 A value class is now a stored identity. The baseline records it, and the serde refuses a reached class that LangGraph cannot revive.
@@ -2685,7 +2687,8 @@ stale pending state. Any completed sibling write from a fanned-out superstep sur
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.56.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.57.0...HEAD
+[0.57.0]: https://github.com/cadance-io/langgraph-events/compare/v0.56.0...v0.57.0
 [0.56.0]: https://github.com/cadance-io/langgraph-events/compare/v0.55.0...v0.56.0
 [0.55.0]: https://github.com/cadance-io/langgraph-events/compare/v0.54.2...v0.55.0
 [0.54.2]: https://github.com/cadance-io/langgraph-events/compare/v0.54.1...v0.54.2
