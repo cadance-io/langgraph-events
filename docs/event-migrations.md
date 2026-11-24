@@ -12,6 +12,7 @@ The table gives the effect of each change on a thread that already has a checkpo
 | Add an event class | It is emitted and matched normally. | None |
 | Remove an event class | Its stored instances stay in the log, and no handler matches them. Under `NamespaceAwareSerde` a read of the thread raises `Cannot revive`. Under LangGraph's default serde the instance revives as `None`, with no error. | Map the identity onto a tombstone. See [Recovering a delete-first deployment](retiring-interrupted.md#recovering-a-delete-first-deployment) |
 | Remove an `Interrupted` subclass | A paused thread holds a pending `__interrupt__` write that names the class. The write cannot revive. | `abandon()` each paused thread first. See [Retiring an Interrupted subclass](retiring-interrupted.md) |
+| Move, rename or delete a value class | A stored value names a class that no longer imports. LangGraph returns raw data or `None`, with no error. | Declare `@migrate_value_from`. To delete the class, see [Removing a damaged value on purpose](#removing-a-damaged-value-on-purpose) |
 | Remove a handler | An event that only the removed handler subscribed to is not delivered, and the run halts early. A thread paused inside the handler cannot resume. `resume()` raises `UnresumableError` by default. | Declare `@on(previously=...)`, or `abandon()` the paused thread |
 | Rename or move a handler | A thread paused inside the handler cannot resume. | Declare `@on(previously="old_name")`. See [Handler renames](#handler-renames) |
 | Rename or move an event class | Under `NamespaceAwareSerde` a read raises `Cannot revive`. Under LangGraph's default serde the instance revives as `None`, with no error. | Declare `@migrate_from`. The [migration gate](migration-gate.md#the-migration-gate) reports an undeclared rename in CI |
@@ -30,8 +31,10 @@ Prefer an additive change. Removal is safe only when no thread is in flight, or 
 
 One gate checks both tracks, from one `MigrationTarget`. The two tracks are independent, so an event and a handler renamed together take both decorators in one PR.
 
+A value class follows the event track. Declare the move with `@migrate_value_from`. The `coverage` and `revive` rules catch a missing move. See [Moving a value class](#moving-a-value-class).
+
 !!! note "The one invariant"
-    **Every rename is a decorator and a `baseline update` in the same PR.** `baseline update` records the event identities and the handler node names. The gate reports a decorator without a baseline update as `BaselineStale`.
+    **Every rename or move is a decorator and a `baseline update` in the same PR.** `baseline update` records the event identities, the value classes and the handler node names. The gate reports a decorator without a baseline update as `BaselineStale`.
 
 ## Handler renames
 
@@ -172,7 +175,7 @@ The read path runs the origin stage (transform, then origin fills), the rename, 
 
 - **Replace, not merge.** The return value is the full kwargs the constructor receives. Return `kw` after an edit in place, or return a new dict. A transform that returns `{}` discards every stored field.
 - **A stable name.** Give the transform a function name at module level, or build it with a factory or `functools.partial`. See [Labels](migration-gate.md#labels) for the key of a local function or a partial. The [migration gate](migration-gate.md#the-rules) reports a lambda, a callable object, or a local function that captures a value with no stable form as `AnonymousCallable`.
-- **Idempotent.** A class-stage transform sees current payloads for ever, so it must accept a payload from every era. Use `kw.pop("x", None)`, not `del kw["x"]` or `kw["x"]`.
+- **Idempotent.** A class-stage transform sees current payloads for ever, so it must accept a payload from every era. Use `kw.pop("x", None)`, not `del kw["x"]` or `kw["x"]`. Do not pop a field that the live class still has. The rewrite writes that field back, and the plan then refuses the thread with `does not settle`. Set the field to its new value instead.
 - **One transform per identity and stage.** Compose the steps in one callable. A second decorator is rejected at decoration. A second hand-authored operation is rejected at serde construction.
 - **The target must resolve**, live or as a rename source, the same rule as `AddField`.
 - **A transform that raises, or returns a non-dict,** fails the read with `Cannot revive <stored identity>: TransformFields raised <Type>: <message>` and a remedy. Under `serde.tolerate_unresolved()` the identity degrades to `UnrevivedIdentity` and is collected, so `unrevivable_threads()` reports it.
@@ -269,6 +272,7 @@ For a cross-module relocation or a composite operation, use `langgraph_events.se
 | Origin-scoped transform | `Migration.transform_fields(module=..., qualname="<historic>", transform=fn)` |
 | Split event | `Migration.split_event(source=Class, select=fn, targets=(Target, ...))` |
 | Cross-module rename | `Migration(name=..., operations=(RenameEvent(...),))` |
+| Move a value class | `Migration((MoveValue("old.module", "Name", Class),))` |
 | Multiple operations | `Migration(name=..., operations=(op1, op2, ...))` |
 
 ```python
@@ -282,7 +286,7 @@ migrations = [
 ]
 ```
 
-Use strings only for a cross-module case where the class cannot be imported at authoring time. `name` is optional everywhere. Import the raw `RenameEvent`, `AddField`, `TransformFields` and `SplitEvent` from `langgraph_events.serde.migrations`. They are not re-exported at `langgraph_events.serde`.
+Use strings only for a cross-module case where the class cannot be imported at authoring time. `name` is optional everywhere. Import the raw `RenameEvent`, `AddField`, `TransformFields`, `SplitEvent` and `MoveValue` from `langgraph_events.serde.migrations`. They are not re-exported at `langgraph_events.serde`.
 
 Every rule above is checked at serde construction, not at the first read. A rename chain that cycles, a duplicate rename source, a dead-end chain or a rename that shadows a live class raises `ValueError`. A fill that names a field the live class does not have raises `ValueError`. A `SplitEvent` with empty `targets` raises `ValueError`, and a non-callable `select` raises `TypeError`. An unknown operation type raises `TypeError`. `@migrate_from(backfill={})` raises `ValueError` at decoration. So a misspelled `@migrate_from("Order.Placedd")` fails at construction.
 
@@ -306,12 +310,13 @@ Every rule above is checked at serde construction, not at the first read. A rena
     `legacy_write` is scope-symmetric. A decorated class outside `namespaces=` is encoded under its current qualname. Keep `namespaces=` the same on the encode pod and the decode pod.
 
 !!! warning "What cannot be written under `legacy_write`"
-    A write relabelled under the oldest historic identity carries the current shape. An old release cannot read a shape that its class does not accept. Drain in-flight threads before the cutover, or accept read-only compatibility: the old payloads revive, and an old pod cannot read a new one. `NamespaceAwareSerde(..., legacy_write=True)` raises `ValueError` at construction for the first three cases:
+    A write relabelled under the oldest historic identity carries the current shape. An old release cannot read a shape that its class does not accept. Drain in-flight threads before the cutover, or accept read-only compatibility: the old payloads revive, and an old pod cannot read a new one. `NamespaceAwareSerde(..., legacy_write=True)` raises `ValueError` at construction for the first four cases:
 
     1. A transform, in either stage. It runs on read and has no inverse.
     2. A split. An old release has no class for the target.
     3. A consolidation. `legacy_write` relabels every instance under the oldest historic identity, and the old classes do not accept the discriminator.
-    4. A required field with a class-global `@backfill`. The library does not refuse this case. The new pod writes the new field, and the class of the old pod rejects the kwarg.
+    4. A value move. An old release cannot import the new module of the value. See [Moving a value class](#moving-a-value-class).
+    5. A required field with a class-global `@backfill`. The library does not refuse this case. The new pod writes the new field, and the class of the old pod rejects the kwarg.
 
     The framework migrations of the library do not count. See [Framework events](#framework-events).
 
@@ -401,11 +406,132 @@ ROLLBACK_FROM_041 = (
 serde = NamespaceAwareSerde(ROLLBACK_FROM_041, namespaces=[Order])
 ```
 
+WARNING: a release that rewrote a value move stores the new module of the value. An older release cannot import that module, so it reads the value as raw data or `None`, with no error. Run [`restore`](migration-gate.md#backup-and-restore) before you roll back such a release.
+
 A rollback to 0.51.0 or older also loses each pending `FoldReducer` write of a later release. A pending write is the write of a task that completed in a superstep where a sibling task interrupted or failed. The later release stores the fold write under an ext code that the older serde does not know. The older serde reads it as `None`, and the fold then replaces its state with `None`, with no error. A read migration cannot fix this. Before the rollback, resume or abandon each thread paused with a pending `FoldReducer` write.
+
+## Moving a value class
+
+A *value class* is an enum, a dataclass, a `NamedTuple` or a pydantic model in an event field or in a channel. A *stored value* is one instance of it in a checkpoint. LangGraph stores the instance under `(module, __name__)`. When the class moves, a stored value names a module that no longer holds the class, and LangGraph returns raw data with no error.
+
+Decorate the class at its new location:
+
+```python
+from enum import StrEnum
+
+from langgraph_events.serde import migrate_value_from
+
+
+@migrate_value_from("shop.old_types")  # the bytes name shop.old_types:Currency
+class Currency(StrEnum):  # the class now lives in shop.money
+    EUR = "eur"
+```
+
+1. Run `baseline update`. The baseline records each value class in `values`, and the key `move shop.old_types:Currency` in `migrations`.
+2. Deploy. The serde reads the old identity as the new one, at any depth, before LangGraph applies its allowlist. So `allowed_msgpack_modules` names the new module only.
+
+    LangGraph logs `Deserializing unregistered type <module>.<Name>` for each value class that its allowlist does not name. The read still revives the class. With `LANGGRAPH_STRICT_MSGPACK=true`, LangGraph blocks the class and logs `Blocked deserialization of <module>.<Name>`. The value then reads as raw data. `topology.serde()` and `from_namespaces` take no allowlist. To allow the class, set `saver.serde = topology.serde().with_msgpack_allowlist([Currency])`, then build the graph with `EventGraph.of(topology, checkpointer=saver)`. In the default mode this call changes nothing, because LangGraph allows every class. A hand-built `NamespaceAwareSerde` takes `allowed_msgpack_modules=` directly.
+3. Run `rewrite --apply --expect <fingerprint>`. An aliased read is a change, so the rewrite stores the new module, also in a channel that holds a value and no event.
+4. In the next release, `check --previous` reports `survived-release` until you delete the decorator.
+
+Pass `name=` when the class was also renamed: `@migrate_value_from("shop.old_types", name="Money")`. For a composite migration, use the raw operation: `Migration((MoveValue("shop.old_types", "Money", Currency),))`. The decorator raises `TypeError` on an `Event`. Use `@migrate_from` for an event class.
+
+`legacy_write=True` raises `ValueError` with a value move. The write path has no way to name the old module, and an old release cannot import the new one. Drain the in-flight threads before the cutover, or drop `legacy_write` and accept read-only compatibility.
+
+The serde finds a value class from the annotations of the event fields and the stored type of each reducer, also through a `TypedDict` or a `NamedTuple`. The walk follows a type alias, the class of a generic alias, and the enum of a `Literal` member. Three cases hide a class from the walk: a field typed `Any` or `object`, a name imported only under `TYPE_CHECKING`, and a subclass stored in a field typed as its base. A name imported only under `TYPE_CHECKING` also hides its real sibling in the same union. For each case, pass the class in `values=` of `NamespaceAwareSerde` or `topology.serde()`. A class in `values=` is recorded even when its module has the name of a standard-library module.
+
+A reached class must be bound at module level under its `__name__`, because LangGraph revives it with one `getattr` on the module. `NamespaceAwareSerde` raises `ValueError` at construction for a class nested inside a class or a function. An enum below a pydantic model is the exception when its module does not bind it: the serde does not refuse it and does not record it. An enum below a model that its module binds is recorded. WARNING: on `langgraph-checkpoint` 4.1.1 an unbound enum reads as `None`, so the model cannot rebuild the value. Bind the enum at module level to prevent this damage. A `NamedTuple` below a pydantic model is not recorded either, because the model dump stores it as a plain tuple. Classes of the standard library, `pydantic`, `langchain_core`, `langgraph` and this library are not recorded.
+
+WARNING: `PostgresSaver` stores a bare `str`, `int`, `float` or `bool` subclass inline, with no class name. So a `StrEnum` alone in a channel reads back as a plain `str`, and no move applies to it. A `StrEnum` inside a list, a dataclass or an event keeps its identity.
+
+A rewrite refuses to remove the name of a value that does not revive alone. A healthy value that a model coerces can lose its class name. The refusal applies to any class, recorded or not. The class can come from your app, a framework package or the standard library.
+
+A *damaged value* is a stored value with both of these facts:
+
+1. Its stored record does not revive alone.
+2. A new encoding of the revived value removes its class name or changes its stored payload.
+
+The first fact clears a healthy enum that a pydantic model coerces to `str`, for example with `use_enum_values=True`. The second fact clears a nested enum that reads as raw data alone and that its model rebuilds. A module-level enum that the allowlist admits, and whose `_missing_` returns a member, revives alone, so it is not damaged. A `datetime` subclass is not judged, because LangGraph reads it only as an ISO string.
+
+The check judges each stored value before any event migration runs, so a transform cannot hide a damaged value. It encodes the revived value, compares the class names and payloads with the stored records, then reads the new bytes again. A name that returns under another module is a re-export, and it is not damaged when the allowlist admits the new name. A healthy value that a migration removes is not damaged. A value inside an event of `drop=` is not judged.
+
+WARNING: a migration that deletes, replaces, copies or wraps a damaged value is refused while the class or member stays deleted. To remove such a value, follow [Removing a damaged value on purpose](#removing-a-damaged-value-on-purpose).
+
+WARNING: a refused thread makes the [`rewrite` plan of the deploy](migration-gate.md#a-checkpoint-that-a-plan-refuses) exit 1, so an old damaged value in a written channel can stop a deploy. Fix the class or add its live module to `allowed_msgpack_modules`, then rerun.
+
+A write stores the live module of a class. WARNING: when `allowed_msgpack_modules` names only a re-export, the new bytes are blocked, and the next read returns raw data. So the rewrite refuses a thread when a value in a channel that it writes does not revive from the new bytes, also for a class that is not recorded. Add the live module to the allowlist, then rerun. A channel that the rewrite does not write keeps its bytes and is not refused. A saver that stores the checkpoint in one blob, such as `SqliteSaver`, writes every channel of a thread that the rewrite writes. A thread that needs no write is not checked. It stays `unchanged`, and the report names the damaged value under `reads as raw data`.
+
+Known limit, unchanged by this check: a normal run or resume of a thread stores a damaged value as `None` or as raw data. The check covers only a rewrite. Fix the class or the allowlist before you resume a thread that holds a damaged value.
+
+WARNING: the verdict `clean` does not cover a damaged value in a channel that the rewrite does not write. The thread stays `unchanged`, the report names the value under `reads as raw data`, and the deploy goes on. The value stays damaged in the store. To close this gap for good, follow [issue #168](https://github.com/cadance-io/langgraph-events/issues/168).
+
+The rewrite also refuses a completed task write that holds a moved value. Resume or abandon that thread, then rerun.
+
+The rewrite stores only the latest checkpoint of each thread. WARNING: after you delete the decorator, an older checkpoint of a thread still names the old module, so a read of that checkpoint loses the value. Do not time-travel to such a checkpoint. A latest checkpoint that still holds old bytes stays `unchanged`, and the `rewrite` output names the class under `reads as raw data`. That line does not fail the command.
+
+### Removing a damaged value on purpose
+
+This recipe is the value form of a [tombstone](retiring-interrupted.md#recovering-a-delete-first-deployment). To remove a damaged value, bring back the class or member for one release, and transform the value away. The library has no separate operation for this removal.
+
+Release 1 brings back the member and declares the transform:
+
+```python
+from enum import Enum
+
+from langgraph_events import IntegrationEvent
+from langgraph_events.serde import transform_fields
+
+
+class Color(Enum):
+    RED = "red"
+    BLUE = "blue"  # brought back for one release
+
+
+def clear_blue(fields: dict[str, object]) -> dict[str, object]:
+    color = fields.get("color")
+    return {**fields, "color": None if color is Color.BLUE else color}
+
+
+@transform_fields(clear_blue)
+class Painted(IntegrationEvent):
+    color: Color | None = None
+    note: str = ""
+```
+
+Put `@transform_fields(...)` on each event class that stores the value. This form also works with `from_namespaces`, because the serde collects the decorator. The new value must be valid for the field. To store `None`, type the field `Color | None` and give it a default. For a hand-built serde, `Migration.transform_fields(target=Painted, transform=clear_blue)` in `migrations=` is the same operation.
+
+1. Deploy release 1, then run `rewrite --apply --expect <fingerprint>`. The value is healthy when the transform removes it, so the check accepts the write.
+2. If a reducer channel holds the value, rebuild that channel before release 2. The rewrite does not recompute a reducer.
+3. In release 2, delete `BLUE` and the transform, then run `baseline update --previous <file>`. The thread reads `None` in `color` and keeps `note`. For a deleted member, the recipe ends here. The class keeps its `values` entry.
+4. If you deleted a whole class, `check` now reports `uncovered-value`, because `values` is cumulative. Delete the entry of the class from `values` in the baseline file by hand, as for a tombstone. No command removes it. The gate then passes.
+
+A transform reaches only an event. To clear a channel that a reducer derives from events, replay the reducer while the member is back, and store the result:
+
+```python
+...  # checkpointer, config and latest_color come from your app
+from langgraph_events.serde import replay_reducer
+
+tup = checkpointer.get_tuple(config)  # config names thread_id and checkpoint_ns
+checkpoint = tup.checkpoint
+rebuilt = replay_reducer(latest_color, checkpoint["channel_values"]["events"])
+old = checkpoint["channel_versions"]["latest_color"]
+new = checkpointer.get_next_version(old, None)
+checkpoint["channel_values"]["latest_color"] = rebuilt
+checkpoint["channel_versions"]["latest_color"] = new
+for seen in checkpoint["versions_seen"].values():
+    if seen.get("latest_color") == old:
+        seen["latest_color"] = new
+checkpointer.put(
+    tup.parent_config or config, checkpoint, tup.metadata, {"latest_color": new}
+)
+```
+
+WARNING: if you skip the replay, the channel keeps the value, and the value is damaged again after release 2. A channel that no reducer derives from events has no such path, so a damaged value there stays refused until the class or member is back.
 
 ## What is not migrated
 
-- **A non-Event payload**, such as a Pydantic model, a plain dataclass or a LangGraph `Interrupt` wrapper, goes through LangGraph's default serde. An event nested inside `Interrupt.value` is migrated. A Pydantic model used as an event field must live at module scope. LangGraph's serde stores it by `__name__` and revives it with `getattr` on the module. On a miss it returns a raw `dict` with no error. `NamespaceAwareSerde` raises `ValueError` at construction for a model nested inside a class or a function. A model held behind `Any` or an untyped container is not reachable from an annotation and is not checked.
+- **The fields of a non-Event payload**, such as a Pydantic model, a plain dataclass or a LangGraph `Interrupt` wrapper, go through LangGraph's default serde. A move of the class is migrated, see [Moving a value class](#moving-a-value-class). A change to its fields is not. An event nested inside `Interrupt.value` is migrated.
+- **A value class deleted with no successor** has no separate retirement operation. Keep the class, declare a move onto a class that replaces it, or follow [Removing a damaged value on purpose](#removing-a-damaged-value-on-purpose), which ends with a hand-deleted `values` entry.
 - **A reducer channel rename** is a LangGraph channel-routing concern. See [What changes safely](#what-changes-safely).
 - **A payload that `ormsgpack` refuses to encode** raises at the source, with no fallback. The library has no extension point for the encoder.
 - **A non-reducer channel value** has no rebuild path. Recovery is custom: read, transform, then write back through the put API of the saver.

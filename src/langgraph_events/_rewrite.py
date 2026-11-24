@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from langgraph_events.serde._jsonplus import (
         DecodedValue,
         NamespaceAwareSerde,
-        ReadRecord,
+        StoredRead,
         UnrevivedIdentity,
     )
 
@@ -56,7 +56,9 @@ class ThreadRewrite:
     table rewrote, as ``"module:qualname"`` strings, deduped in read
     order. ``dropped`` counts the stored events ``drop`` removed, per
     identity. ``reason`` says what to do when the status is
-    ``"refused"``.
+    ``"refused"``. ``lost_values`` names each value class that a
+    re-encode of its stored value removes. A thread that history refuses
+    is not judged, so its ``lost_values`` is empty.
     """
 
     thread_id: str
@@ -64,6 +66,7 @@ class ThreadRewrite:
     migrated: tuple[tuple[str, str], ...] = ()
     dropped: dict[str, int] = field(default_factory=dict)
     reason: str = ""
+    lost_values: tuple[str, ...] = ()
 
     @property
     def dropped_label(self) -> str:
@@ -72,6 +75,18 @@ class ThreadRewrite:
         return ", ".join(
             f"{count} {'event' if count == 1 else 'events'} of {label}"
             for label, count in self.dropped.items()
+        )
+
+    @property
+    def lost_values_line(self) -> str | None:
+        """The report line of the lost values. A refused thread has none,
+        because its ``reason`` states the refusal."""
+        if self.status == "refused" or not self.lost_values:
+            return None
+        labels = ", ".join(self.lost_values)
+        return (
+            f"  {self.thread_id}: reads as raw data: {labels}. To remove it, "
+            f"follow 'Removing a damaged value on purpose'."
         )
 
 
@@ -111,6 +126,7 @@ class RewriteReport:
             if t.status == "rewrite" and t.dropped
         )
         lines.extend(f"  {t.thread_id}: refused, {t.reason}" for t in self.refused)
+        lines.extend(line for t in self.threads if (line := t.lost_values_line))
         return "\n".join(lines)
 
 
@@ -157,15 +173,81 @@ def validate_drop(
     return tuple(classes)
 
 
-def _migrated_pairs(reads: Sequence[ReadRecord]) -> tuple[tuple[str, str], ...]:
+def _migrated_pairs(reads: Sequence[StoredRead]) -> tuple[tuple[str, str], ...]:
     """The touched records as ``(stored, live)`` labels, deduped in read
     order."""
     pairs: list[tuple[str, str]] = []
-    for stored, live, touched, _built in reads:
-        pair = (Identity(*stored).label, Identity(*live).label)
-        if touched and pair not in pairs:
+    for read in reads:
+        pair = (Identity(*read.stored).label, Identity(*read.resolved).label)
+        if read.touched and pair not in pairs:
             pairs.append(pair)
     return tuple(pairs)
+
+
+def _lost_names(
+    records: Sequence[StoredRead], drop_identities: set[tuple[str, str]]
+) -> tuple[str, ...]:
+    """Each class name that a write removes from *records*, before any
+    migration. A record inside an event of ``drop`` does not count."""
+    from langgraph_events.serde._values import ValueRead  # noqa: PLC0415
+
+    lost: list[tuple[str, str]] = []
+    skip = 0
+    for read in reversed(records):
+        if skip:
+            skip -= 1
+        elif isinstance(read, ValueRead):
+            lost.extend(read.lost)
+        elif read.resolved in drop_identities:
+            skip = read.nested
+    return tuple(dict.fromkeys(Identity(*i).label for i in lost))
+
+
+def _records_of(
+    value: object, decoded: Sequence[DecodedValue]
+) -> list[StoredRead] | None:
+    """The reads of each decode that returned *value*, or ``None`` when the
+    serde did not decode it. ``None`` is one object, so several decodes can
+    return it."""
+    found = [records for result, records in decoded if result is value]
+    return [read for records in found for read in records] if found else None
+
+
+def _written_loss(
+    decoded: Sequence[DecodedValue],
+    drop_identities: set[tuple[str, str]],
+    values: dict[str, Any],
+    written_channels: Iterable[str],
+    interrupt_writes: Sequence[tuple[str, str, Any]],
+) -> str | None:
+    """Why a value that this rewrite stores loses a class name, or ``None``.
+
+    A saver that stores the checkpoint in one blob writes every channel. A
+    bare scalar can bypass the serde, and it holds no class. Any other
+    written value that the serde did not decode is refused.
+    """
+    places = [(f"channel {c!r}", values[c]) for c in written_channels]
+    for value, _records in decoded:
+        if isinstance(value, dict) and value.get("channel_values") is values:
+            places = [("the stored checkpoint", value)]
+    pending = [(f"the pending {w[1]} write", w[2]) for w in interrupt_writes]
+    for place, value in [*places, *pending]:
+        records = _records_of(value, decoded)
+        if records is None:
+            if isinstance(value, (str, int, float, type(None))):
+                continue
+            return f"get_tuple() returned {place} as a copy, so no check can run"
+        labels = _lost_names(records, drop_identities)
+        if labels:
+            return (
+                f"{', '.join(labels)} in {place} reads back as raw data, so the "
+                f"write removes the class name or changes the value. Fix the "
+                f"class or add its live module to allowed_msgpack_modules, then "
+                f"rerun. To remove the "
+                f"value, see 'Removing a damaged value on purpose' in "
+                f"docs/event-migrations.md"
+            )
+    return None
 
 
 def _interrupt_payloads(writes: Sequence[tuple[str, str, Any]]) -> list[Any]:
@@ -237,24 +319,26 @@ def plan_thread(
     exactly, not the class hierarchy: the rule ``validate_drop`` and the
     byte scan apply.
     """
+    from langgraph_events.serde._values import ValueRead  # noqa: PLC0415
+
     reads = [record for _value, records in decoded for record in records]
     pairs = _migrated_pairs(reads)
+    lost_values: tuple[str, ...] = ()
     values: dict[str, Any] = tup.checkpoint["channel_values"]
     dropped = _count_drops(values, drop)
     drop_identities = {(cls.__module__, cls.__qualname__) for cls in drop}
-    present = any(live in drop_identities for _stored, live, *_ in reads)
+    present = any(read.resolved in drop_identities for read in reads)
 
     def refused(reason: str) -> ThreadRewrite:
-        return ThreadRewrite(
-            thread_id, "refused", migrated=pairs, dropped=dropped, reason=reason
-        )
+        return ThreadRewrite(thread_id, "refused", pairs, dropped, reason, lost_values)
 
     pending = list(tup.pending_writes or ())
     reason = _history_refusal(unresolved, values, pending)
     if reason is not None:
         return refused(reason)
+    lost_values = _lost_names(reads, drop_identities)
     if not pairs and not dropped and not present:
-        return ThreadRewrite(thread_id, "unchanged")
+        return ThreadRewrite(thread_id, "unchanged", lost_values=lost_values)
 
     reason = _pending_refusal(pending, values, drop, decoded)
     if reason is not None:
@@ -263,7 +347,17 @@ def plan_thread(
     interrupt_writes = tuple(w for w in pending if w[1] == _INTERRUPT_CHANNEL)
     new_values, changed = _drop_from_log(values, drop)
     checkpoint = _copy_checkpoint(tup.checkpoint, new_values)
-    built = frozenset(id(value) for *_, values in reads for value in values)
+    built = frozenset(
+        id(value)
+        for read in reads
+        if not isinstance(read, ValueRead)
+        for value in read.built
+    )
+    moved = frozenset(
+        id(value)
+        for value, records in decoded
+        if any(isinstance(r, ValueRead) and r.touched for r in records)
+    )
     reason, new_versions = _verify_and_bump(
         serde,
         checkpoint,
@@ -271,12 +365,16 @@ def plan_thread(
         interrupt_writes,
         drop_identities,
         built,
+        moved,
         next_version,
+    )
+    reason = reason or _written_loss(
+        decoded, drop_identities, values, new_versions, interrupt_writes
     )
     if reason is not None:
         return refused(reason)
     return RewritePlan(
-        ThreadRewrite(thread_id, "rewrite", migrated=pairs, dropped=dropped),
+        ThreadRewrite(thread_id, "rewrite", pairs, dropped, lost_values=lost_values),
         checkpoint=checkpoint,
         new_versions=new_versions,
         interrupt_writes=interrupt_writes,
@@ -403,7 +501,7 @@ def _pending_refusal(
         if channel == _INTERRUPT_CHANNEL:
             continue
         where = f"thread has a completed task write on task {task_id!r} in"
-        records = next((r for result, r in decoded if result is value), None)
+        records = _records_of(value, decoded)
         if records is None:
             return (
                 f"{where} channel {channel!r} that get_tuple() of the "
@@ -421,7 +519,7 @@ def _pending_refusal(
 def _write_problem(
     channel: str,
     value: object,
-    records: Sequence[ReadRecord],
+    records: Sequence[StoredRead],
     drop: tuple[type[Event], ...],
     *,
     shifts: bool,
@@ -437,11 +535,11 @@ def _write_problem(
     an ``events`` entry. A position in the write then names another event.
     """
     dropped = {(cls.__module__, cls.__qualname__) for cls in drop}
-    for stored, live, touched, _built in records:
-        if live in dropped:
-            return f"holds {Identity(*live).label}, a class in drop"
-        if touched:
-            return f"holds {Identity(*stored).label}, which a migration rewrites"
+    for read in records:
+        if read.resolved in dropped:
+            return f"holds {Identity(*read.resolved).label}, a class in drop"
+        if read.touched:
+            return f"holds {Identity(*read.stored).label}, which a migration rewrites"
     if shifts and channel in _POSITION_WRITES and value not in (None, []):
         return (
             "holds an index into channel 'events', and drop removes an event "
@@ -457,11 +555,13 @@ def _verify_and_bump(
     interrupt_writes: Sequence[tuple[str, str, Any]],
     forbidden: set[tuple[str, str]],
     built: frozenset[int],
+    moved: frozenset[int],
     next_version: Callable[[Any, None], Any],
 ) -> tuple[str | None, dict[str, Any]]:
     """Verify every value ``put`` will encode, and bump the version of
-    each channel whose value changed or carries an event. *built* holds
-    the ``id()`` of each field value a migration built. Returns the
+    each channel whose value changed, carries an event, or holds a value
+    of *moved*. A saver stores a blob only for a bumped channel. *built*
+    holds the ``id()`` of each field value a migration built. Returns the
     refusal reason, or ``None`` and the ``new_versions`` for ``put``."""
     historic = set(serde._tables.rename_table)
     versions: dict[str, Any] = checkpoint["channel_versions"]
@@ -473,7 +573,7 @@ def _verify_and_bump(
         )
         if problem is not None:
             return problem, {}
-        if channel in changed or identities:
+        if channel in changed or identities or id(value) in moved:
             old = versions.get(channel)
             new = next_version(old, None)
             versions[channel] = new
@@ -621,8 +721,8 @@ def _verify_value(
     *where* names the value in a refusal, ``"channel 'events'"`` or
     ``"the pending __interrupt__ write"``. Returns ``(problem,
     identities)``. *problem* is ``None`` when the value passed.
-    *identities* lists every event identity the bytes hold, so the
-    caller knows whether the channel carries an event.
+    *identities* lists every event identity the bytes hold, so the caller
+    knows that the channel needs a write.
     """
     from langgraph_events.serde._jsonplus import (  # noqa: PLC0415
         _scan_identities,
@@ -649,7 +749,8 @@ def _verify_value(
                 f"the re-encode still names historic identity {identity[1]} in {where}",
                 [],
             )
-    return _revival_problem(serde, data, value, where, built), identities
+    problem = _revival_problem(serde, data, value, where, built)
+    return problem, identities
 
 
 def _revival_problem(
@@ -665,7 +766,8 @@ def _revival_problem(
 
     The bytes settle when a read of them migrates no record. Then a read
     of the store after the write migrates nothing, unless the saver did
-    not store these bytes.
+    not store these bytes. A value that still names a moved source does
+    not settle, because its read relabels it.
     """
     with serde._record_reads() as reads:
         start = len(reads)
@@ -673,12 +775,15 @@ def _revival_problem(
             serde.loads_typed(data)
         except ValueError as exc:
             return f"the rewritten value in {where} does not revive ({exc})"
-    unsettled = dict.fromkeys(live for _stored, live in _migrated_pairs(reads[start:]))
+    met = reads[start:]
+    unsettled = dict.fromkeys(live for _stored, live in _migrated_pairs(met))
     if unsettled:
         return (
             f"a migration of {', '.join(unsettled)} does not settle: a read of "
             f"the rewritten value in {where} changes it again. Make each "
-            f"class-stage transform return its own output unchanged, then rerun"
+            f"class-stage transform return its own output unchanged. Do not "
+            f"remove a field of the live class. Set it to a value instead, "
+            f"then rerun"
         )
     invalid = _invalid_model(value, "", built, inside=False)
     if invalid is None:

@@ -1213,8 +1213,10 @@ def describe_rewrite_store_refusals():
 
             assert thread.reason == (
                 f"a migration of {_identity(held)} does not settle: a read of the "
-                f"rewritten value in channel 'events' changes it again. Make each "
-                f"class-stage transform return its own output unchanged, then rerun"
+                f"rewritten value in channel 'events' changes it again. Make "
+                f"each class-stage transform return its own output unchanged. "
+                f"Do not remove a field of the live class. Set it to a value "
+                f"instead, then rerun"
             )
             assert saver.blobs == blobs
 
@@ -1576,7 +1578,12 @@ def describe_rewrite_store_refusals():
             serde = NamespaceAwareSerde(events=(Started,))
 
             problem, _identities = _verify_value(
-                serde, [Started(), object()], "events", set(), set(), frozenset()
+                serde,
+                [Started(), object()],
+                "events",
+                set(),
+                set(),
+                frozenset(),
             )
 
             assert problem is not None

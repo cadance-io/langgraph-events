@@ -313,7 +313,7 @@ def describe_gate_commands():
                 spec = _install(monkeypatch, target)
 
                 assert main(["baseline", "update", spec]) == 0
-                assert _read(target.baseline)["version"] == 4
+                assert _read(target.baseline)["version"] == 5
 
         def when_a_shipped_migration_left_the_code():
             def it_exits_two_and_prints_the_callers_command(
@@ -727,7 +727,8 @@ def describe_rewrite_command():
                     f"{_Counted.__qualname__} does not settle: a read of the "
                     f"rewritten value in channel 'events' changes it again. "
                     f"Make each class-stage transform return its own output "
-                    f"unchanged, then rerun"
+                    f"unchanged. Do not remove a field of the live class. Set it "
+                    f"to a value instead, then rerun"
                 )
 
         def when_the_running_release_is_not_the_expected_one():

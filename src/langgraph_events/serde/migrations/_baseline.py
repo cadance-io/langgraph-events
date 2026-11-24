@@ -1,6 +1,6 @@
 """The committed baseline: what earlier releases could have stored.
 
-Version 4. A read accepts versions 1 to 4. A write always gives version 4.
+Version 5. A read accepts versions 1 to 5. An update always gives version 5.
 :meth:`Baseline.updated` computes every value a write stores.
 """
 
@@ -14,6 +14,7 @@ from langgraph_events._identity import Identity
 from langgraph_events.serde.migrations._core import (
     MigrationKey,
     MigrationSet,
+    ValueIdentity,
     _rename_sources,
     migration_fingerprint,
 )
@@ -28,8 +29,8 @@ Fields = frozenset[str] | None
 """The init fields recorded for one identity. ``None`` when the record
 predates version 3, which recorded no fields."""
 
-BASELINE_VERSION = 4
-_SUPPORTED_BASELINE_VERSIONS = (1, 2, 3, 4)
+BASELINE_VERSION = 5
+_SUPPORTED_BASELINE_VERSIONS = (1, 2, 3, 4, 5)
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,17 @@ class MigrationsUnrecorded:
 
 
 @dataclass(frozen=True)
+class ValuesUnrecorded:
+    """A baseline of version 1 to 4. It recorded no value class.
+
+    This is not "no value": an identity that only old bytes hold is not
+    known, so the value rules judge the classes the code reaches today.
+    """
+
+    version: int
+
+
+@dataclass(frozen=True)
 class CodeRecord:
     """What the code held when a version 4 baseline was written.
 
@@ -98,15 +110,24 @@ class CodeRecord:
         """
         pruned = dict(history)
         sources = _rename_sources(self.keys)
-        kept = {key.identity for key in current.keys}
+        kept = {key.identity for key in current.keys if key.kind != "move"}
         for key in current.deleted_since(self.keys):
-            if key.identity in kept:
+            if key.kind == "move" or key.identity in kept:
                 continue
             if key.kind == "rename" or key.identity in sources:
                 pruned.pop(key.identity, None)
             elif key.identity in self.live:
                 pruned[key.identity] = self.live[key.identity]
         return pruned
+
+    def moved_away(self, current: MigrationSet) -> frozenset[ValueIdentity]:
+        """The value sources of each move of this code that *current* no
+        longer holds. The deploy of this code rewrote their records."""
+        return frozenset(
+            ValueIdentity(key.module, key.qualname)
+            for key in current.deleted_since(self.keys)
+            if key.kind == "move"
+        )
 
 
 @dataclass(frozen=True)
@@ -117,16 +138,17 @@ class Baseline:
     retired: Mapping[Identity, Fields]
     handlers: frozenset[str]
     code: CodeRecord | MigrationsUnrecorded
+    values: frozenset[ValueIdentity] | ValuesUnrecorded
 
     @classmethod
     def read(cls, path: Path) -> Baseline:
-        """The baseline at *path*. A missing file is an empty version 4 baseline.
+        """The baseline at *path*. A missing file is an empty version 5 baseline.
 
         Raises:
             ValueError: when the file has an unsupported version or shape.
         """
         if not path.exists():
-            return cls({}, {}, frozenset(), CodeRecord((), {}))
+            return cls({}, {}, frozenset(), CodeRecord((), {}), frozenset())
         try:
             raw: object = json.loads(path.read_text())
         except json.JSONDecodeError as error:
@@ -162,6 +184,8 @@ class Baseline:
             _check_v3_shape(raw, path)
         if version >= 4:
             _check_v4_shape(raw, path)
+        if version >= 5:
+            _check_v5_shape(raw, path)
         return cls(
             events=_fields_by_identity(raw["events"]),
             retired=_fields_by_identity(raw.get("retired", [])),
@@ -177,10 +201,15 @@ class Baseline:
                 if version >= 4
                 else MigrationsUnrecorded(version)
             ),
+            values=(
+                frozenset(ValueIdentity(e["module"], e["name"]) for e in raw["values"])
+                if version >= 5
+                else ValuesUnrecorded(version)
+            ),
         )
 
     def write(self, path: Path) -> None:
-        """Write this baseline to *path* as version 4."""
+        """Write this baseline to *path* in its own version."""
         path.write_text(json.dumps(self._payload(), indent=2, sort_keys=True) + "\n")
 
     @property
@@ -194,7 +223,8 @@ class Baseline:
         return "lge-b1-" + hashlib.sha256(content.encode()).hexdigest()[:16]
 
     def _payload(self) -> dict[str, Any]:
-        """The version 4 JSON content.
+        """The JSON content. A version 4 baseline keeps its own content, so
+        a hold made against it keeps its digest.
 
         Raises:
             TypeError: when the baseline records no code. Only a read of a
@@ -203,7 +233,7 @@ class Baseline:
         if isinstance(self.code, MigrationsUnrecorded):
             raise TypeError("A baseline of version 1 to 3 is never written.")
         live = self.code.live
-        return {
+        payload = {
             "version": BASELINE_VERSION,
             "events": [
                 {**_entry(i, f), "live": sorted(live[i])}
@@ -214,6 +244,15 @@ class Baseline:
             "migrations": [
                 _record_entry(record)
                 for record in sorted(self.records, key=lambda r: r.key)
+            ],
+        }
+        if isinstance(self.values, ValuesUnrecorded):
+            return {**payload, "version": self.values.version}
+        return {
+            **payload,
+            "values": [
+                {"module": identity.module, "name": identity.name}
+                for identity in sorted(self.values)
             ],
         }
 
@@ -242,12 +281,18 @@ class Baseline:
         record it covered, so the history of its identity resets. See
         :meth:`CodeRecord.prune`. ``handlers`` is rebuilt. ``migrations``
         is exactly the code's keys, and a hold stays on a key the code
-        still holds.
+        still holds. ``values`` is cumulative too. A move that *previous*
+        shipped and the code dropped removes its source.
         """
         live = code.live_fields()
         history = self.history
+        value_history = (
+            set() if isinstance(self.values, ValuesUnrecorded) else set(self.values)
+        )
         if previous is not None and isinstance(previous.code, CodeRecord):
             history = previous.code.prune(history, code.migrations)
+            for source in previous.code.moved_away(code.migrations):
+                value_history.discard(source)
         holds = {record.key: record.hold for record in self.records}
         return Baseline(
             events={
@@ -263,6 +308,7 @@ class Baseline:
                 ),
                 live,
             ),
+            values=frozenset(value_history | code.serde.value_identities()),
         )
 
     def held(self, key: MigrationKey, hold: Hold) -> Baseline:
@@ -322,9 +368,18 @@ class Baseline:
             lines.append(f"- handler {handler}")
         for handler in sorted(other.handlers - self.handlers):
             lines.append(f"+ handler {handler}")
+        lines.extend(self._migration_changes(other))
+        lines.extend(self._value_changes(other))
+        return tuple(lines)
+
+    def _migration_changes(self, other: Baseline) -> list[str]:
+        """The version line of an older file, then one line per migration
+        that only one baseline records."""
+        lines: list[str] = []
+        if isinstance(self.values, ValuesUnrecorded):
+            lines.append(f"~ version {self.values.version} -> {BASELINE_VERSION}")
         mine_keys, their_keys = self.recorded_keys, other.recorded_keys
         if isinstance(mine_keys, MigrationsUnrecorded):
-            lines.append(f"~ version {mine_keys.version} -> {BASELINE_VERSION}")
             mine_keys = frozenset()
         if isinstance(their_keys, frozenset):
             lines.extend(
@@ -333,7 +388,17 @@ class Baseline:
             lines.extend(
                 f"+ migration {k.label}" for k in sorted(their_keys - mine_keys)
             )
-        return tuple(lines)
+        return lines
+
+    def _value_changes(self, other: Baseline) -> list[str]:
+        """One line per value identity that only one baseline records."""
+        if isinstance(other.values, ValuesUnrecorded):
+            return []
+        mine = frozenset() if isinstance(self.values, ValuesUnrecorded) else self.values
+        return [
+            *(f"- value {i.label}" for i in sorted(mine - other.values)),
+            *(f"+ value {i.label}" for i in sorted(other.values - mine)),
+        ]
 
     @property
     def history(self) -> Mapping[Identity, Fields]:
@@ -411,6 +476,15 @@ def _check_v4_shape(raw: dict[str, Any], path: Path) -> None:
             f"no `live`: {', '.join(incomplete)}. Give each entry "
             f'"live": [] and run `baseline update`. The update fills the list '
             f"from the live class."
+        )
+
+
+def _check_v5_shape(raw: dict[str, Any], path: Path) -> None:
+    """Reject a file with no ``values``."""
+    if "values" not in raw:
+        raise ValueError(
+            f"Baseline at {path} is version 5 but has no `values` list. Restore "
+            f"the file from version control, then run `baseline update`."
         )
 
 

@@ -6,7 +6,6 @@ ext-hook between unpack and revive. The wire format is unchanged from
 prior library versions — this is a read-side affordance only. See #70.
 """
 
-import annotationlib
 import dataclasses
 import enum
 import functools
@@ -21,8 +20,8 @@ from typing import (
     TYPE_CHECKING,
     Any,
     ClassVar,
+    NamedTuple,
     Protocol,
-    TypeGuard,
     TypeVar,
 )
 
@@ -31,7 +30,13 @@ from langgraph_events._identity import Identity
 from langgraph_events._labels import distinct_labels
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+    from collections.abc import (
+        Callable,
+        Collection,
+        Iterable,
+        Mapping,
+        Sequence,
+    )
 
 PROGRAM = "python -m langgraph_events.serde.migrations"
 TARGET_PLACEHOLDER = "<module:attr of the MigrationTarget>"
@@ -166,7 +171,20 @@ class SplitEvent:
         object.__setattr__(self, "targets", targets)
 
 
-Operation = RenameEvent | AddField | TransformFields | SplitEvent
+@dataclass(frozen=True)
+class MoveValue:
+    """The stored value identity ``(old_module, old_name)`` now revives as
+    *target*, an enum, a dataclass, a ``NamedTuple`` or a pydantic model.
+
+    The key names the stored source, as a rename key does.
+    """
+
+    old_module: str
+    old_name: str
+    target: type
+
+
+Operation = RenameEvent | AddField | TransformFields | SplitEvent | MoveValue
 
 
 @dataclass(frozen=True)
@@ -378,7 +396,7 @@ def _target_identity(
     return module, qualname
 
 
-MigrationKind = typing.Literal["rename", "fill", "transform", "split"]
+MigrationKind = typing.Literal["rename", "fill", "transform", "split", "move"]
 _KINDS: tuple[MigrationKind, ...] = typing.get_args(MigrationKind)
 _IDENT = r"[^\W\d]\w*"
 _QUALPART = rf"(?:{_IDENT}|<locals>|<lambda>)"
@@ -407,7 +425,8 @@ class MigrationKey:
     ``rename`` key names the stored source identity. A ``fill`` key names
     the identity it fills and the ``field``. A ``transform`` or ``split``
     key names the identity and ``via``, the ``module:qualname`` of the
-    transform or select callable. The stage is not stored: a key is in the
+    transform or select callable. A ``move`` key names the stored source
+    identity of a value class. The stage is not stored: a key is in the
     origin stage when its identity is a rename source of the same set.
     """
 
@@ -667,6 +686,7 @@ class MigrationTables:
     transform_table: dict[tuple[str, str], TransformFields]
     origin_transform_table: dict[tuple[str, str], TransformFields]
     split_table: dict[tuple[str, str], SplitEvent]
+    value_move_table: dict[tuple[str, str], type]
 
     def _named(self) -> tuple[tuple[str, dict[tuple[str, str], Any]], ...]:
         return (
@@ -676,6 +696,7 @@ class MigrationTables:
             ("TransformFields", self.transform_table),
             ("origin TransformFields", self.origin_transform_table),
             ("SplitEvent", self.split_table),
+            ("MoveValue", self.value_move_table),
         )
 
     def keys(self) -> frozenset[MigrationKey]:
@@ -708,6 +729,7 @@ class MigrationTables:
                     )
                     for op in self.split_table.values()
                 ),
+                *(MigrationKey("move", *source) for source in self.value_move_table),
             )
         )
 
@@ -783,6 +805,17 @@ class MigrationTables:
                 "stored event into two on a payload value' in "
                 "docs/event-migrations.md."
             )
+        # An old release cannot import the new module, and the write path
+        # has no way to name the old one.
+        if self.value_move_table:
+            raise ValueError(
+                "legacy_write=True cannot be combined with a MoveValue or "
+                "@migrate_value_from. An old release cannot read the new "
+                "module of the value. Drain in-flight threads before the "
+                "cutover, or drop legacy_write and accept read-only "
+                "compatibility. See 'Moving a value class' in "
+                "docs/event-migrations.md."
+            )
 
     def migrate(
         self, module: str, qualname: str, kwargs: dict[str, Any]
@@ -851,6 +884,7 @@ def _flatten_and_validate(
     addfield_ops: list[tuple[AddField, str]] = []
     transform_ops: list[tuple[TransformFields, str]] = []
     split_ops: list[tuple[SplitEvent, str]] = []
+    value_moves: list[MoveValue] = []
     for migration in migrations:
         for op in migration.operations:
             if isinstance(op, RenameEvent):
@@ -874,6 +908,8 @@ def _flatten_and_validate(
                 transform_ops.append((op, migration.name))
             elif isinstance(op, SplitEvent):
                 split_ops.append((op, migration.name))
+            elif isinstance(op, MoveValue):
+                value_moves.append(op)
             else:
                 # ``Operation`` is closed by design. Silently ignoring an
                 # unknown type hides authoring errors — surface them at
@@ -881,8 +917,8 @@ def _flatten_and_validate(
                 raise TypeError(
                     f"Unknown migration operation type "
                     f"{type(op).__name__!r} in {_migration_label(migration.name)}. "
-                    f"Expected RenameEvent, AddField, TransformFields or "
-                    f"SplitEvent."
+                    f"Expected RenameEvent, AddField, TransformFields, "
+                    f"SplitEvent or MoveValue."
                 )
 
     rename_table: dict[tuple[str, str], tuple[str, str]] = {}
@@ -903,7 +939,52 @@ def _flatten_and_validate(
         transform_table,
         origin_transform_table,
         split_table,
+        _value_move_table(value_moves),
     )
+
+
+def _value_move_table(moves: Sequence[MoveValue]) -> dict[tuple[str, str], type]:
+    """Key each move on its stored source, and validate it.
+
+    A source can still import the target, because the relabel runs before
+    the import. A source that resolves to another class is refused, because
+    the move would hide that class.
+
+    Raises:
+        ValueError: on an invalid target or source.
+    """
+    table: dict[tuple[str, str], type] = {}
+    for op in moves:
+        source = (op.old_module, op.old_name)
+        label = f"MoveValue({op.old_module}:{op.old_name!r})"
+        if issubclass(op.target, Event):
+            raise ValueError(
+                f"{label}: the target {op.target.__qualname__} is an event. "
+                f"Use @migrate_from for an event."
+            )
+        try:
+            target = ValueIdentity.of(op.target)
+        except ValueError as error:
+            raise ValueError(f"{label}: {error}") from error
+        if source == tuple(target):
+            raise ValueError(f"{label} moves onto itself. Remove the move.")
+        if table.get(source, op.target) is not op.target:
+            raise ValueError(
+                f"{label} has two targets: {table[source].__qualname__} and "
+                f"{op.target.__qualname__}. Each source maps to one class."
+            )
+        if Identity(*source).owned_by_library:
+            raise ValueError(
+                f"{label}: this library owns that module. Do not move its names."
+            )
+        live = live_value_class(*source)
+        if live is not None and live is not op.target:
+            raise ValueError(
+                f"{label} names another live class, {live.__qualname__}. A move "
+                f"would hide that class on read."
+            )
+        table[source] = op.target
+    return table
 
 
 def _bucket_splits(
@@ -1201,6 +1282,60 @@ def _migration_label(name: str) -> str:
     return f"migration {name!r}" if name else "an unnamed migration"
 
 
+def live_value_class(module: str, name: str) -> type | None:
+    """The class that *module* itself defines under *name*, or ``None``.
+
+    A class that *module* only imports does not count, because the bytes
+    that name *module* then depend on an import that nothing records.
+    """
+    try:
+        found = getattr(importlib.import_module(module), name, None)
+    except ImportError, AttributeError:
+        return None
+    if isinstance(found, type) and (found.__module__, found.__name__) == (module, name):
+        return found
+    return None
+
+
+class ValueIdentity(NamedTuple):
+    """The stored name of a value class: its module and its ``__name__``.
+
+    LangGraph stores ``__name__``, not ``__qualname__``, and revives with
+    one ``getattr`` on the module. So a class nested in another class has no
+    identity that revives.
+    """
+
+    module: str
+    name: str
+
+    @classmethod
+    def of(cls, value_cls: type) -> ValueIdentity:
+        """The identity of *value_cls*.
+
+        Raises:
+            ValueError: when the module does not bind *value_cls* under its
+                ``__name__``.
+        """
+        if live_value_class(value_cls.__module__, value_cls.__name__) is value_cls:
+            return cls(value_cls.__module__, value_cls.__name__)
+        remedy = (
+            f"Move {value_cls.__qualname__} to module scope in {value_cls.__module__}."
+            if "." in value_cls.__qualname__
+            else f"Bind it on module {value_cls.__module__} under the name "
+            f"{value_cls.__name__!r}. Alias a parametrized generic at module "
+            f"level, for example IntBox = Box[int]."
+        )
+        raise ValueError(
+            f"Its checkpoint identity {value_cls.__module__}."
+            f"{value_cls.__name__} does not import. {remedy}"
+        )
+
+    @property
+    def label(self) -> str:
+        """``<module>:<name>``, the form every message and report uses."""
+        return f"{self.module}:{self.name}"
+
+
 def _resolve_identity(
     module: str,
     qualname: str,
@@ -1400,6 +1535,48 @@ def _split_kwargs(
 _MIGRATE_FROM_ATTR = "__lge_migrate_from__"
 _ORIGIN_BACKFILL_ATTR = "__lge_origin_backfill__"
 _ORIGIN_TRANSFORM_ATTR = "__lge_origin_transform__"
+_VALUE_SOURCES_ATTR = "__lge_value_sources__"
+
+
+def migrate_value_from(
+    *old_modules: str, name: str | None = None
+) -> Callable[[type], type]:
+    """Revive a value class that a checkpoint stores under an old module.
+
+    Decorate the enum, dataclass, ``NamedTuple`` or pydantic model at its new
+    location::
+
+        @migrate_value_from("shop.old_types")
+        class Currency(StrEnum):
+            EUR = "eur"
+
+    *name* is the stored ``__name__`` when the class was also renamed. The
+    read relabels the old identity at any depth, and ``rewrite --apply``
+    writes the new module back. The release rule then asks you to delete
+    the decorator.
+
+    Raises:
+        ValueError: when no old module is given.
+        TypeError: when the decorated class is an ``Event``.
+    """
+    if not old_modules:
+        raise ValueError("migrate_value_from needs at least one old module.")
+
+    def decorate(cls: type) -> type:
+        if issubclass(cls, Event):
+            raise TypeError(
+                f"{cls.__qualname__} is an Event. @migrate_value_from is for a "
+                f"value class. Use @migrate_from on an event class."
+            )
+        sources = tuple((module, name or cls.__name__) for module in old_modules)
+        setattr(
+            cls,
+            _VALUE_SOURCES_ATTR,
+            (*cls.__dict__.get(_VALUE_SOURCES_ATTR, ()), *sources),
+        )
+        return cls
+
+    return decorate
 
 
 def migrate_from(
@@ -1690,99 +1867,6 @@ def _serde_event_classes(
     return out
 
 
-def _annotation_types(tp: object) -> Iterator[object]:
-    """*tp* and every type argument under it, depth first."""
-    yield tp
-    for arg in typing.get_args(tp):
-        yield from _annotation_types(arg)
-
-
-def _is_pydantic_model(tp: object) -> TypeGuard[type]:
-    """Duck-typed the same way the LangGraph serializer decides to write
-    a pydantic ext record: a class with a callable ``model_dump`` (v2)
-    or a callable ``dict`` (v1). Both decode branches upstream revive by
-    ``__name__`` and return the dump dict on a miss."""
-    return isinstance(tp, type) and (
-        callable(getattr(tp, "model_dump", None)) or callable(getattr(tp, "dict", None))
-    )
-
-
-def _importable_by_name(cls: type) -> bool:
-    """Whether ``getattr(import_module(cls.__module__), cls.__name__)`` is
-    *cls*. That lookup is how the LangGraph serializer revives a pydantic
-    payload, so this is the exact condition for a silent raw-dict miss.
-
-    Any import failure counts as a miss. Upstream catches ``Exception``
-    on the same call, and a serde constructor must not surface an
-    unrelated import-time traceback from the payload's module.
-    """
-    try:
-        module = importlib.import_module(cls.__module__)
-    except Exception:
-        return False
-    return getattr(module, cls.__name__, None) is cls
-
-
-def _enclosing_names(cls: type) -> dict[str, Any]:
-    """Names visible from *cls*'s enclosing class bodies, outermost first.
-
-    ``typing.get_type_hints`` resolves a forward reference against the
-    module only. A field typed as a sibling nested in the same
-    ``Namespace`` needs the enclosing class's names as ``localns``. Stops
-    at the first level it cannot walk, such as ``<locals>``.
-    """
-    names: dict[str, Any] = {}
-    obj: Any = sys.modules.get(cls.__module__)
-    for part in cls.__qualname__.split(".")[:-1]:
-        obj = getattr(obj, part, None) if obj is not None else None
-        if obj is None:
-            break
-        names.update(vars(obj))
-    return names
-
-
-def _field_hints(cls: type) -> dict[str, Any]:
-    """Resolved annotation per dataclass field of *cls*.
-
-    Restricted to ``dataclasses.fields()``: a ``ClassVar`` or ``InitVar``
-    is never checkpointed, so it must not be checked. A name that cannot
-    resolve stays a ``ForwardRef`` in the ``FORWARDREF`` format, so it
-    hides one field only, not the class. The event class is the
-    caller's. This check must not turn its own annotation problem into
-    a serde build failure.
-    """
-    if not is_dataclass(cls):
-        return {}
-    names = {f.name for f in fields(cls)}
-    hints = typing.get_type_hints(
-        cls, localns=_enclosing_names(cls), format=annotationlib.Format.FORWARDREF
-    )
-    return {name: tp for name, tp in hints.items() if name in names}
-
-
-def _unimportable_payload_models(
-    classes: Iterable[type],
-) -> list[tuple[type, str, type]]:
-    """``(event class, field name, model class)`` for every pydantic model
-    reachable from an event field annotation whose ``(module, __name__)``
-    does not resolve back to the model (#167).
-
-    Walks generic arguments, so ``list[Holder.Cfg] | None`` reaches
-    ``Holder.Cfg``. Does not descend into a model's own fields: a model
-    nested inside another model is dumped and re-validated as a dict by
-    pydantic itself, so its identity is never stored. A model held
-    behind ``Any`` or an untyped container is not reachable from an
-    annotation and is not checked.
-    """
-    out: list[tuple[type, str, type]] = []
-    for cls in classes:
-        for field, tp in _field_hints(cls).items():
-            for inner in _annotation_types(tp):
-                if _is_pydantic_model(inner) and not _importable_by_name(inner):
-                    out.append((cls, field, inner))
-    return out
-
-
 def _init_fields(cls: type) -> frozenset[str]:
     """The init fields of the event class *cls*: the fields a serde writes.
 
@@ -1961,11 +2045,14 @@ def _collect_decorated_migrations(
 
 
 def _unreachable_migrate_from_siblings(
-    scope: dict[tuple[str, str], type],
+    scope: Collection[tuple[str, str]],
+    *,
+    marker: str = _MIGRATE_FROM_ATTR,
+    modules: Iterable[str] = (),
 ) -> list[type]:
-    """``@migrate_from``-decorated classes that live in a module *scope*
-    already reaches, but were themselves never passed to the serde.
-    Their migration is silently never collected.
+    """Classes with the decorator *marker* in a module that *scope* or
+    *modules* already reaches, that were themselves never passed to the
+    serde. Their migration is silently never collected.
 
     Scoped to modules ``scope`` already reaches, not a process-wide
     class scan. A decorated class in a module this serde was never told
@@ -1977,7 +2064,7 @@ def _unreachable_migrate_from_siblings(
     scope, in the same file as the namespace it retires an identity for,
     passed via ``namespaces=`` alone with no ``events=`` to carry it.
     """
-    reached_modules = {module_name for module_name, _qualname in scope}
+    reached_modules = {*modules, *(module for module, _name in scope)}
     seen: set[int] = set()
     found: list[type] = []
     for module_name in reached_modules:
@@ -1988,7 +2075,10 @@ def _unreachable_migrate_from_siblings(
             if (
                 isinstance(value, type)
                 and id(value) not in seen
-                and _MIGRATE_FROM_ATTR in value.__dict__
+                and marker in value.__dict__
+                and (
+                    marker == _MIGRATE_FROM_ATTR or value.__module__ in reached_modules
+                )
                 and (value.__module__, value.__qualname__) not in scope
             ):
                 seen.add(id(value))

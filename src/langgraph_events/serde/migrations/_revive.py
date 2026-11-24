@@ -5,24 +5,26 @@ identity. :func:`synthesize_legacy_payload` is the public byte assembly
 behind it.
 """
 
+import annotationlib
 import dataclasses
+import inspect
+import threading
 from typing import TYPE_CHECKING, Any
 
 import ormsgpack
 
 # ``_option`` comes straight from its langgraph source (mypy treats
 # ``langgraph.*`` as untyped, so no strict ``no_implicit_reexport``
-# tripwire). ``EXT_NAMESPACE_AWARE_EVENT`` is defined in ``_jsonplus`` and
-# importing that module first means its LangGraph-drift smoke fence runs
-# before the line below, so the actionable error is still preserved.
-from langgraph.checkpoint.serde.jsonplus import _option
+# tripwire). Importing ``_jsonplus`` first means its LangGraph-drift smoke
+# fence runs before the line below, so the actionable error is still preserved.
+from langgraph.checkpoint.serde.event_hooks import register_serde_event_listener
+from langgraph.checkpoint.serde.jsonplus import EXT_CONSTRUCTOR_KW_ARGS, _option
 
 from langgraph_events._event import Event
 from langgraph_events._identity import Identity
-from langgraph_events.serde._jsonplus import (
-    _UNEXPECTED_KWARG_RE,
-    EXT_NAMESPACE_AWARE_EVENT,
-)
+from langgraph_events.serde._ext_codes import EXT_NAMESPACE_AWARE_EVENT
+from langgraph_events.serde._jsonplus import _UNEXPECTED_KWARG_RE
+from langgraph_events.serde._values import _is_pydantic_model
 from langgraph_events.serde.migrations._core import (
     _resolve_identity,
     _resolve_rename,
@@ -30,6 +32,8 @@ from langgraph_events.serde.migrations._core import (
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+    from langgraph.checkpoint.serde.event_hooks import SerdeEvent
 
     from langgraph_events.serde._jsonplus import NamespaceAwareSerde
 
@@ -70,6 +74,57 @@ def revival_failure(
     if Identity(*identity).owned_by_library:
         return _resolve_failure(serde, identity)
     return _revive_failure(serde, identity, recorded)
+
+
+def value_revival_failure(serde: NamespaceAwareSerde, live: type) -> str | None:
+    """Why a stored record of the value class *live* cannot revive, or
+    ``None``.
+
+    LangGraph passes each dataclass field to the constructor, so the
+    constructor signature must accept exactly those names. No constructor
+    runs. The allowlist is read from LangGraph's own ``msgpack_blocked``
+    event, from this thread only, because the listener registry is
+    process-global. The probe record holds no payload, so LangGraph checks
+    the allowlist and then stops before the constructor.
+    """
+    if dataclasses.is_dataclass(live) and not _is_pydantic_model(live):
+        stored = dict.fromkeys(f.name for f in dataclasses.fields(live))
+        try:
+            signature = inspect.signature(
+                live, annotation_format=annotationlib.Format.FORWARDREF
+            )
+            signature.bind(**stored)
+        except TypeError as error:
+            return (
+                f"LangGraph stores every field of {live.__qualname__} and passes "
+                f"each one to the constructor, which refuses them: {error}. Make "
+                f"the constructor accept exactly the stored fields"
+            )
+    identity = (live.__module__, live.__name__)
+    probe = ormsgpack.Ext(
+        EXT_CONSTRUCTOR_KW_ARGS, ormsgpack.packb(identity, option=_option)
+    )
+    events: list[SerdeEvent] = []
+    probing_thread = threading.get_ident()
+
+    def keep_own_event(event: SerdeEvent) -> None:
+        if threading.get_ident() == probing_thread:
+            events.append(event)
+
+    unregister = register_serde_event_listener(keep_own_event)
+    try:
+        serde.loads_typed(("msgpack", ormsgpack.packb(probe, option=_option)))
+    finally:
+        unregister()
+    if not any(
+        e["kind"] == "msgpack_blocked" and (e["module"], e["name"]) == identity
+        for e in events
+    ):
+        return None
+    return (
+        f"LangGraph blocks {live.__qualname__}. "
+        f"Add ({live.__module__!r}, {live.__name__!r}) to allowed_msgpack_modules"
+    )
 
 
 def _resolve_failure(

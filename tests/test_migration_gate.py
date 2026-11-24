@@ -79,6 +79,11 @@ if TYPE_CHECKING:
 
     from langgraph.checkpoint.base import BaseCheckpointSaver
 
+_NO_VALUES_LINE = (
+    "The committed baseline records no value class, so run this update on "
+    "code that moves no value class."
+)
+
 
 class _Problem:
     """A plain mixin that a failure event composes."""
@@ -210,7 +215,37 @@ def describe_check():
 
                 (finding,) = check(target).findings
 
-                assert finding == BaselineStale(("~ version 3 -> 4",), ())
+                assert finding == BaselineStale(
+                    ("~ version 3 -> 5",), (), values_unrecorded=True
+                )
+
+        def when_the_baseline_records_no_value_class():
+            def it_asks_for_the_update_on_code_that_moves_no_value_class(
+                tmp_path: Path,
+            ):
+                target = _baselined(_target(tmp_path, Shop))
+                raw = _read(target.baseline)
+                raw["version"] = 4
+                del raw["values"]
+                target.baseline.write_text(json.dumps(raw))
+
+                (finding,) = check(target).findings
+
+                assert _NO_VALUES_LINE in finding.lines(Invocation("app:target"))
+
+        def when_the_baseline_records_the_value_classes():
+            def it_does_not_ask_for_code_that_moves_no_value_class(
+                tmp_path: Path,
+            ):
+                target = _baselined(_target(tmp_path, Renamed))
+                raw = _read(target.baseline)
+                raw["migrations"] = []
+                target.baseline.write_text(json.dumps(raw))
+
+                (finding,) = check(target).findings
+
+                lines = finding.lines(Invocation("app:target"))
+                assert _NO_VALUES_LINE not in lines
 
         def when_a_recorded_class_transform_follows_a_rename():
             def it_reports_no_deleted_migration(tmp_path: Path):

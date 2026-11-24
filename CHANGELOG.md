@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+A value class is now a stored identity. The baseline records it, and the serde refuses a reached class that LangGraph cannot revive.
+
+| Before | Now | Fix |
+|---|---|---|
+| The baseline was version 4 and recorded events, handlers and migrations | The baseline is version 5 and adds a cumulative `values` list. A read accepts versions 1 to 5. The first `check` after the upgrade reports `baseline-stale` | Run `baseline update` once, on code that moves no value class. Commit that baseline before you move a value class. A version 4 baseline records no value class, so the gate cannot see a move made in the same change |
+| `NamespaceAwareSerde` refused only a pydantic model in an event field that its module does not bind under `__name__` | It also refuses an enum, a dataclass or a `NamedTuple`, in an event field, inside another value, or in a reducer channel. The read of such a class returned raw data. An enum below a pydantic model that its module does not bind is not refused and not recorded. On `langgraph-checkpoint` 4.1.1 it reads as `None`, so the model cannot rebuild it | Move the class to module scope |
+| The gate ignored value classes | The gate reports `uncovered-value`, `unrevivable-value` and `value-move-out-of-scope`. A strict `allowed_msgpack_modules` that omits a reached class now fails `check`. A dataclass whose constructor does not accept exactly its stored fields also fails, because LangGraph cannot rebuild it | Declare the move, add the class to the allowlist, or make the constructor accept the stored fields |
+| A rewrite could remove a class name from a stored channel | A rewrite refuses to remove the name of a value that does not revive alone, for any class, even when an unrelated migration causes the write. A `datetime` subclass is not judged, because LangGraph reads it only as an ISO string. A healthy value that a model coerces can lose its class name. A stored value is damaged when its record does not revive alone and a re-encode removes its class name or changes its stored payload. The check runs before any event migration, so a migration that deletes, replaces, copies or wraps a damaged value is refused while the class or member stays deleted. A refused thread makes the `rewrite` plan exit 1, so the deploy step stops unless it passes `--accept refused`. A thread that needs no write stays `unchanged`, and the report names each damaged value. The verdict `clean` does not cover a damaged value in a channel that the rewrite does not write. A saver that stores the checkpoint in one blob, such as `SqliteSaver`, writes every channel of a thread that the rewrite writes. A thread that needs no write is not checked. It stays `unchanged`, and the report names the damaged value under `reads as raw data`. Known limit, unchanged from earlier releases: a normal run or resume of a thread stores a damaged value as `None` or as raw data | Fix the class or add its live module to the allowlist, then rerun. To remove the value, bring back the class or member for one release and transform the value away. See "Removing a damaged value on purpose" in the event migrations guide |
+| A rollback needed no step for a value class | An older release cannot import the new module that a rewrite of a value move stored, so it reads the value as raw data or `None`, with no error | WARNING: run `restore` before you roll back a release that rewrote a value move |
+
+### Added
+
+- `@migrate_value_from` and `MoveValue` declare that a value class moved. The read relabels the old identity at any depth before LangGraph's allowlist runs. LangGraph keeps every constructor. With no move declared, the fingerprint is unchanged and a read takes the same path as before.
+- `rewrite --apply` writes the new module back, also into a channel that holds a value and no event. The release rule then asks you to delete the decorator.
+- `NamespaceAwareSerde(values=...)` and `topology.serde(values=...)` name a value class behind a field typed `Any` or `object`.
+
 ## [0.56.0] - 2026-11-22
 
 ### Breaking

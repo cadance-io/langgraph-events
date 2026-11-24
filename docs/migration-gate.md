@@ -74,8 +74,11 @@ def test_migration_gate() -> None:
 | `baseline` | `BaselineStale` | The committed file differs from the file the code needs. The finding lists each difference. | `baseline update` |
 | `names` | `AnonymousCallable` | A transform or a split uses a lambda, a callable object, or a local function that captures a value with no stable form. A replacement callable would read as the same migration. | Give the callable a module-level name, then `baseline update` |
 | `coverage` | `MigrationOutOfScope` | A class of the graph declares a read-time migration, and the serde does not read the class. The migration does nothing. | Pass its namespace in `namespaces=` of the serde, or the class in `events=`, then `baseline update` |
+| `coverage` | `ValueMoveOutOfScope` (`value-move-out-of-scope`) | A class declares `@migrate_value_from`, and the serde does not reach it. The move does nothing. | Pass the class in `values=` of the serde, then `baseline update` |
 | `coverage` | `Uncovered` | A recorded identity has no live class and no migration. The finding names live classes with the same last name, a likely rename. | Add the migration, then `baseline update` |
+| `coverage` | `UncoveredValue` (`uncovered-value`) | A recorded value class is not defined at its identity, and no move names it. An import left at the old module does not cover it. The finding names a live class with the same name, a likely move. | Add `@migrate_value_from`, then `baseline update`. For a class that you deleted on purpose, follow [Removing a damaged value on purpose](event-migrations.md#removing-a-damaged-value-on-purpose) |
 | `revive` | `Unrevivable` | A synthesized payload of the recorded shape fails the real read path. | Add or fix the migration, then `baseline update` |
+| `revive` | `UnrevivableValue` (`unrevivable-value`) | LangGraph cannot rebuild a recorded value: its allowlist blocks the live class, for example because it names only the old module, or the dataclass constructor does not accept exactly the stored fields. | Fix the class or `allowed_msgpack_modules`, then `baseline update` |
 | `handlers` | `HandlerMissing` | A recorded handler node name has no live handler and no `@on(previously=...)` alias. | Declare the alias, then `baseline update` |
 | `release` | `SurvivedRelease` | The previous release shipped this migration, and the code still holds it. | Delete the migration, then `baseline update --previous` |
 
@@ -133,14 +136,15 @@ The removed form `python -m langgraph_events.serde.migrations <module:factory> <
 
 ```json
 {
-  "version": 4,
+  "version": 5,
   "events": [{"module": "myapp.orders", "qualname": "Order.Place.Placed",
               "fields": ["legacy_total", "order_id", "tracking"], "live": ["order_id", "tracking"]}],
   "retired": [{"module": "myapp.orders", "qualname": "Order.ApprovalRequired", "fields": ["order_id"]}],
   "handlers": [{"name": "handle_approval"}],
   "migrations": [{"label": "rename myapp.orders:Order.ApprovalRequired"},
                  {"label": "fill myapp.orders:Order.Place.Placed[tracking]",
-                  "hold": {"reason": "a paused thread refuses the rewrite", "against": "lge-b1-3f0c2a9e41b7d655"}}]
+                  "hold": {"reason": "a paused thread refuses the rewrite", "against": "lge-b1-3f0c2a9e41b7d655"}}],
+  "values": [{"module": "myapp.money", "name": "Currency"}]
 }
 ```
 
@@ -152,12 +156,13 @@ The removed form `python -m langgraph_events.serde.migrations <module:factory> <
 | `retired` | Every identity an update dropped from `events`, with the fields last recorded for it. No `fields` key when the last record predates version 3. An identity that is live again leaves `retired`. A retired identity must revive through a migration onto a surviving class or a tombstone |
 | `handlers` | The handler node names. An update rebuilds it. `EventGraph.resumable_node_names` returns each handler node name and each `@on(previously=...)` alias |
 | `migrations` | The label of every migration of your own that the code holds, and any hold. The framework migrations of the library are not in it |
+| `values` | Each value class that a checkpoint can store by name. Cumulative. It holds names and no shape, so a deleted enum member passes `check`. The `rewrite` plan names a thread that holds the member under `reads as raw data`. The plan does not fail, and its verdict can stay `clean` |
 
-`events` and `retired` never share an identity. The reader raises `ValueError` on an overlap. A file of version 1, 2 or 3 still loads. A file with an unknown version raises `ValueError`. The next `baseline update` writes version 4.
+`events` and `retired` never share an identity. The reader raises `ValueError` on an overlap. A file of version 1, 2, 3 or 4 still loads. A file with an unknown version raises `ValueError`. The next `baseline update` writes version 5. A move that the previous release shipped and the code dropped removes its source. A file of version 1 to 4 recorded no values. So the gate cannot see a value class that moved before the first version 5 baseline. Write the version 5 baseline on the old code first.
 
 ## Lifecycle of a read-time migration
 
-A read-time migration is `@migrate_from`, `@backfill`, `@transform_fields`, `@split_event` or a `Migration` in `migrations=`. It ships in release N and leaves the code in release N+1. The [migration gate](#the-migration-gate) records in the baseline file which release shipped each migration. The `rewrite` command makes the store match the code of release N. Release N+1 then reads the store with no migration.
+A read-time migration is `@migrate_from`, `@migrate_value_from`, `@backfill`, `@transform_fields`, `@split_event` or a `Migration` in `migrations=`. It ships in release N and leaves the code in release N+1. The [migration gate](#the-migration-gate) records in the baseline file which release shipped each migration. The `rewrite` command makes the store match the code of release N. Release N+1 then reads the store with no migration.
 
 The `backup`, `rewrite`, `restore` and `drop-backups` commands open `store` of the target. The gate does not.
 
@@ -300,6 +305,7 @@ A refused checkpoint keeps the command from exit 0, and `rewrite_store()` writes
 - The reason starts with `the rewritten value ... holds an invalid ...`. A migration builds or replaces a pydantic model that fails the validation of its class. The message names the model, the event field and the error. Fix the migration so that the value validates, then run `rewrite --apply`. LangGraph's reader revives a stored model with its constructor, and on a validation error with `model_construct`, which validates nothing. So once the migration leaves the code, every read accepts the invalid value with no warning. The check reads only a model that a migration built or replaced, and calls `type(model)(**model.model_dump())`, the call of LangGraph's reader. A model that the store already held is stored unchanged. So a valid model that does not rebuild from its own dump, for example through a field alias, does not refuse the thread.
 - It is paused on a dropped class, or a dropped event is pending dispatch on a paused thread. After the drop, the resumed task finds no event to handle and ends the thread with the answer lost. Abandon the thread first, with [`abandon()`](control-flow.md#ending-a-pause-without-answering-it-abandon).
 - It holds a completed task write from a fanned-out sibling, and the rewrite would change that write. The checkpointer API cannot rewrite the write. Resume or abandon the thread first. When the thread has no pending interrupt, `resume()` and a plain `abandon()` refuse it. Call `abandon(config, require_interrupt=False)` instead. The reason names the task, the channel, and the identity or the index that the write holds. A write changes when it holds a record that a migration rewrites, an instance of a class in `drop=`, or an index into `events` when `drop=` removes an event from `events`. A completed write to `events` or `_pending` that holds an entry that is not an event is also refused, because a resume would append the entry to the log. Restore the class of the entry, or delete the thread. The rewrite keeps every other completed write as it is. A resume applies the write and does not run its task again.
+- The write would remove the class name, or change the stored payload, of a value that does not revive alone, in a stored channel or a pending interrupt. This applies to any class, recorded or not. A `datetime` subclass is not judged, because LangGraph reads it only as an ISO string. The reason contains `reads back as raw data, so the write removes the class name`. An unrelated migration can cause the write, so an earlier damaged value can stop a later deploy. Fix the class or add its live module to `allowed_msgpack_modules`, then rerun. To remove the value, see [Removing a damaged value on purpose](event-migrations.md#removing-a-damaged-value-on-purpose).
 - It holds a pending `__error__` write from a failed task. Run the thread again, or abandon it with `abandon(config, require_interrupt=False)`.
 - A dropped instance sits inside a field of another event, or in a reducer value. Leave the class in place, or settle the thread.
 - `get_tuple()` of the checkpointer returns a completed task write as another object than the one that the serde decoded. Or the read after the write finds a newer checkpoint, or a saver that broke a rule. See [Checkpointers](#checkpointers).
@@ -411,4 +417,5 @@ What the rewrite does not do:
 - A historic checkpoint keeps the old bytes. After the class is deleted, `get_state_history()` cannot read it.
 - `drop=` removes the stored event only. Reducer state is not recomputed. Use [`replay_reducer`](event-migrations.md#recovering-with-replay_reducer).
 - An event inside a non-Event container field, a dataclass or a pydantic model, has no migratable identity. The rewrite does not reach it.
+- A value class in a field or a channel is rewritten only for a declared move. See [Moving a value class](event-migrations.md#moving-a-value-class).
 - `legacy_write=True` is refused with `ValueError`. Under `legacy_write` the rewrite would store the historic identity again.

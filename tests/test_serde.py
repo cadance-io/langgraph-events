@@ -2,6 +2,8 @@
 
 import contextlib
 import dataclasses
+import sys
+import types
 import warnings
 from typing import Any, ClassVar
 
@@ -2358,6 +2360,24 @@ def describe_UnreachableMigrationWarning():
             with pytest.warns(UnreachableMigrationWarning, match="OrphanTombstone"):
                 NamespaceAwareSerde(namespaces=(fx.Gate,))
 
+    def when_a_reached_module_imports_the_decorated_class():
+        def it_warns_naming_the_class(monkeypatch: pytest.MonkeyPatch):
+            import _migrate_from_warning_fixture as fx
+
+            from langgraph_events.serde import UnreachableMigrationWarning
+
+            module = types.ModuleType("imports_a_tombstone")
+            module.OrphanTombstone = fx.OrphanTombstone  # type: ignore[attr-defined]
+            monkeypatch.setitem(sys.modules, module.__name__, module)
+
+            class Reached(Interrupted):
+                pass
+
+            Reached.__module__ = module.__name__
+
+            with pytest.warns(UnreachableMigrationWarning, match="OrphanTombstone"):
+                NamespaceAwareSerde(events=(Reached,))
+
     def when_the_decorated_class_is_passed_via_events():
         def it_does_not_warn():
             import _migrate_from_warning_fixture as fx
@@ -3991,7 +4011,7 @@ def describe_record_reads():
             serde.loads_typed(synthesize_legacy_payload(mod, "_Rec.Old", {}))
             serde.loads_typed(synthesize_legacy_payload(mod, "_Rec.Old", {}))
 
-        assert reads == [
+        assert [read[:4] for read in reads] == [
             ((mod, "_Rec.Old"), (mod, "_Rec.New"), True, ()),
             ((mod, "_Rec.Old"), (mod, "_Rec.New"), True, ()),
         ]
@@ -4003,7 +4023,7 @@ def describe_record_reads():
         with serde._record_reads() as reads:
             serde.loads_typed(serde.dumps_typed(_RecSameIdentity()))
 
-        assert reads == [
+        assert [read[:4] for read in reads] == [
             (
                 (mod, "_RecSameIdentity"),
                 (mod, "_RecSameIdentity"),
@@ -4022,7 +4042,7 @@ def describe_record_reads():
         with serde._record_reads() as reads:
             serde.loads_typed(serde.dumps_typed(_RecIdentityTransform()))
 
-        assert reads == [
+        assert [read[:4] for read in reads] == [
             ((mod, "_RecIdentityTransform"), (mod, "_RecIdentityTransform"), False, ())
         ]
 
@@ -4034,7 +4054,7 @@ def describe_record_reads():
             serde.loads_typed(synthesize_legacy_payload(mod, "_RecFilled", {}))
             serde.loads_typed(serde.dumps_typed(_RecFilled(flag=False)))
 
-        assert reads == [
+        assert [read[:4] for read in reads] == [
             ((mod, "_RecFilled"), (mod, "_RecFilled"), True, (True,)),
             ((mod, "_RecFilled"), (mod, "_RecFilled"), False, ()),
         ]
@@ -4047,7 +4067,7 @@ def describe_record_reads():
             serde.loads_typed(synthesize_legacy_payload(mod, "_RecGone", {}))
 
         assert [u.qualname for u in unresolved] == ["_RecGone"]
-        assert reads == []
+        assert [read[:4] for read in reads] == []
 
     def it_records_an_untouched_class_as_untouched():
         serde = NamespaceAwareSerde(events=(_RecUntouched,))
@@ -4056,7 +4076,9 @@ def describe_record_reads():
         with serde._record_reads() as reads:
             serde.loads_typed(serde.dumps_typed([_RecUntouched()]))
 
-        assert reads == [((mod, "_RecUntouched"), (mod, "_RecUntouched"), False, ())]
+        assert [read[:4] for read in reads] == [
+            ((mod, "_RecUntouched"), (mod, "_RecUntouched"), False, ())
+        ]
 
     def it_stays_off_outside_the_block():
         serde = NamespaceAwareSerde(namespaces=[_Rec])

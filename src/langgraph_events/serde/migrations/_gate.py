@@ -15,18 +15,24 @@ from langgraph_events.serde.migrations._baseline import (
     Hold,
     MigrationRecord,
     MigrationsUnrecorded,
+    ValuesUnrecorded,
 )
 from langgraph_events.serde.migrations._core import (
     PROGRAM,
     TARGET_PLACEHOLDER,
     MigrationKey,
+    live_value_class,
 )
-from langgraph_events.serde.migrations._revive import revival_failure
+from langgraph_events.serde.migrations._revive import (
+    revival_failure,
+    value_revival_failure,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from langgraph_events._identity import Identity
+    from langgraph_events.serde.migrations._core import ValueIdentity
     from langgraph_events.serde.migrations._target import MigrationTarget, Snapshot
 
 Rule = Literal["baseline", "names", "coverage", "revive", "handlers", "release"]
@@ -107,12 +113,15 @@ class BaselineStale:
     ``changed`` pairs each deleted key with a new key of the code of the
     same kind on the same identity: the key of one migration can have
     changed, for example when a factory argument changed.
+    ``values_unrecorded`` is true for a committed file of version 1 to 4,
+    which never recorded values. A version 5 file with an empty list is false.
     """
 
     code: ClassVar[str] = "baseline-stale"
     changes: tuple[str, ...]
     deleted: tuple[MigrationKey, ...]
     changed: tuple[tuple[MigrationKey, MigrationKey], ...] = ()
+    values_unrecorded: bool = False
 
     @property
     def subject(self) -> str:
@@ -122,8 +131,21 @@ class BaselineStale:
         """The explanation, the differences, then the next command."""
         explanation = ("The baseline does not match the code:",)
         changes = tuple(f"  {change}" for change in self.changes)
+        values = (
+            (
+                "The committed baseline records no value class, so run this "
+                "update on code that moves no value class.",
+            )
+            if self.values_unrecorded
+            else ()
+        )
         if not self.deleted:
-            return (*explanation, *changes, f"Run: {invocation.baseline_update()}")
+            return (
+                *explanation,
+                *changes,
+                *values,
+                f"Run: {invocation.baseline_update()}",
+            )
         changed = tuple(
             f"{old.label} and {new.label} are of the same kind on the same "
             f"event, so the key of one migration can have changed. The history "
@@ -136,6 +158,7 @@ class BaselineStale:
             *changed,
             "A migration left the code. When the previous release shipped it, "
             "the update with --previous drops the history it covered.",
+            *values,
             f"Run: {invocation.baseline_update(prune=True)}",
         )
 
@@ -240,6 +263,87 @@ class Unrevivable:
 
 
 @dataclass(frozen=True)
+class UncoveredValue:
+    """A recorded value identity that its module does not define and that
+    no move names. An import left at the old module does not cover it."""
+
+    code: ClassVar[str] = "uncovered-value"
+    identity: ValueIdentity
+    moved_to: tuple[ValueIdentity, ...] = ()
+
+    @property
+    def subject(self) -> str:
+        return self.identity.label
+
+    def lines(self, invocation: Invocation) -> tuple[str, ...]:
+        """The explanation, then each remedy. A class with the same name
+        elsewhere puts the move first."""
+        deleted = (
+            "If you deleted the class on purpose, follow 'Removing a damaged "
+            "value on purpose' in the Event migrations guide. Then delete this "
+            'entry from "values" in the baseline file.'
+        )
+        moved = (
+            f"If the class moved, add @migrate_value_from("
+            f"{self.identity.module!r}) to the class that replaces it, then "
+            f"run: {invocation.baseline_update()}"
+        )
+        explanation = (
+            "No class defined at this identity and no move covers it, so a "
+            "stored value of it reads back as raw data."
+        )
+        if self.moved_to:
+            hint = (
+                "A class with the same name lives at "
+                f"{', '.join(i.label for i in self.moved_to)}."
+            )
+            return (explanation, hint, moved, deleted)
+        return (explanation, deleted, moved)
+
+
+@dataclass(frozen=True)
+class ValueMoveOutOfScope:
+    """A ``@migrate_value_from`` class that the serde does not reach."""
+
+    code: ClassVar[str] = "value-move-out-of-scope"
+    identity: ValueIdentity
+
+    @property
+    def subject(self) -> str:
+        return self.identity.label
+
+    def lines(self, invocation: Invocation) -> tuple[str, ...]:
+        """The explanation, then the fix and the next command."""
+        return (
+            "The class declares @migrate_value_from, but no event field or "
+            "channel type of the serde reaches it, so its move does nothing.",
+            f"Pass the class in values= of the serde, then run: "
+            f"{invocation.baseline_update()}",
+        )
+
+
+@dataclass(frozen=True)
+class UnrevivableValue:
+    """A recorded value identity that LangGraph cannot rebuild as its live
+    class: the allowlist blocks it, or a field is ``init=False``."""
+
+    code: ClassVar[str] = "unrevivable-value"
+    identity: ValueIdentity
+    error: str
+
+    @property
+    def subject(self) -> str:
+        return self.identity.label
+
+    def lines(self, invocation: Invocation) -> tuple[str, ...]:
+        """The read error, then the next command."""
+        return (
+            f"A stored value of this identity does not revive: {self.error}.",
+            f"Fix the class or the allowlist, then run: {invocation.baseline_update()}",
+        )
+
+
+@dataclass(frozen=True)
 class HandlerMissing:
     """A recorded handler node name that no live handler or alias has."""
 
@@ -296,8 +400,11 @@ Finding = (
     BaselineStale
     | AnonymousCallable
     | MigrationOutOfScope
+    | ValueMoveOutOfScope
     | Uncovered
     | Unrevivable
+    | UncoveredValue
+    | UnrevivableValue
     | HandlerMissing
     | SurvivedRelease
 )
@@ -374,14 +481,19 @@ def check(target: MigrationTarget, *, previous: Path | None = None) -> GateRepor
         deleted = _deleted(committed, code)
         findings.append(
             BaselineStale(
-                committed.changes_to(want), deleted, _changed(deleted, committed, code)
+                committed.changes_to(want),
+                deleted,
+                _changed(deleted, committed, code),
+                values_unrecorded=isinstance(committed.values, ValuesUnrecorded),
             )
         )
     findings.extend(
         AnonymousCallable(k) for k in sorted(code.migrations.keys) if k.anonymous
     )
     findings.extend(MigrationOutOfScope(i) for i in code.migrations_out_of_scope())
+    findings.extend(ValueMoveOutOfScope(i) for i in code.serde.unreached_value_moves())
     findings.extend(_coverage_and_revival(code, judged))
+    findings.extend(_value_findings(code, judged))
     findings.extend(
         HandlerMissing(name)
         for name in sorted(
@@ -529,6 +641,33 @@ def _coverage_and_revival(
             findings.append(
                 Unrevivable(identity, retired=identity in judged.retired, error=failure)
             )
+    return findings
+
+
+def _value_findings(
+    code: Snapshot, judged: Baseline
+) -> list[UncoveredValue | UnrevivableValue]:
+    """The ``coverage`` and ``revive`` rules for each recorded value."""
+    if isinstance(judged.values, ValuesUnrecorded):
+        return []
+    moves = code.serde._client_tables.value_move_table
+    reached = sorted(code.serde.value_identities())
+    findings: list[UncoveredValue | UnrevivableValue] = []
+    for identity in sorted(judged.values):
+        live = moves.get(identity) or live_value_class(*identity)
+        if live is None:
+            findings.append(
+                UncoveredValue(
+                    identity,
+                    tuple(
+                        v for v in reached if v.name == identity.name and v != identity
+                    ),
+                )
+            )
+            continue
+        failure = value_revival_failure(code.serde, live)
+        if failure is not None:
+            findings.append(UnrevivableValue(identity, failure))
     return findings
 
 

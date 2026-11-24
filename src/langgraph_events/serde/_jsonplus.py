@@ -21,8 +21,14 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import ormsgpack
 from langgraph.types import Interrupt
 
+from langgraph_events.serde._ext_codes import (
+    EXT_FOLD_CONTRIBUTIONS,
+    EXT_INTERRUPT,
+    EXT_NAMESPACE_AWARE_EVENT,
+)
+
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
 
     from langgraph_events.serde.migrations._core import Migration, MigrationTables
 from langgraph.checkpoint.serde.jsonplus import (
@@ -58,43 +64,36 @@ if not hasattr(JsonPlusSerializer(), "_unpack_ext_hook"):  # pragma: no cover
         "or open an issue against langgraph-events."
     )
 
-# Unique among LangGraph's existing ext codes (currently 0..6).
-EXT_NAMESPACE_AWARE_EVENT = 100
-# Dedicated code so we can recurse via our own ``_default`` when re-encoding
-# the wrapped value — LangGraph's generic dataclass path uses ``_msgpack_enc``
-# which is hardcoded to ``default=_msgpack_default`` and would bypass us.
-EXT_INTERRUPT = 101
-# A ``FoldReducer`` channel write. LangGraph stores it as a pending write when
-# a sibling task interrupts or fails in the same superstep. Upstream's
-# dataclass path would encode its events by ``__name__``, so a nested event
-# would not revive.
-EXT_FOLD_CONTRIBUTIONS = 102
-
 # The dataclass ``TypeError`` for a kwarg the class does not declare.
 # ``_revival_remedy`` and the revive gate's failure hint both read the
 # field name out of it.
 _UNEXPECTED_KWARG_RE = re.compile(r"unexpected keyword argument '(\w+)'")
 
-# Imported AFTER the EXT constants, ``_UNEXPECTED_KWARG_RE`` and ``_option``
-# are bound: ``_core`` pulls in the ``serde.migrations`` package whose
-# ``__init__`` re-exports ``testing``, which imports those names back from
-# this module. Defining them first lets that re-entry resolve against a
-# partially-initialized ``_jsonplus`` without a circular import.
+# Imported AFTER ``_UNEXPECTED_KWARG_RE`` and ``_option`` are bound: ``_core``
+# pulls in the ``serde.migrations`` package whose ``__init__`` re-exports
+# ``testing``, which imports those names back from this module. Defining them
+# first lets that re-entry resolve against a partially-initialized
+# ``_jsonplus`` without a circular import.
 from langgraph_events._identity import Identity  # noqa: E402
 from langgraph_events.serde._framework import FRAMEWORK_MIGRATIONS  # noqa: E402
+from langgraph_events.serde._values import (  # noqa: E402
+    ValueRead,
+    ValueReader,
+    ValueScope,
+)
 from langgraph_events.serde.migrations._core import (  # noqa: E402
     PROGRAM,
     TARGET_PLACEHOLDER,
     MigrationSet,
     SplitEvent,
     TransformFields,
+    ValueIdentity,
     _callable_id,
     _CallableError,
     _collect_decorated_migrations,
     _flatten_and_validate,
     _init_fields,
     _resolve_identity,
-    _unimportable_payload_models,
     _unreachable_migrate_from_siblings,
 )
 
@@ -119,16 +118,31 @@ class UnrevivedIdentity(NamedTuple):
     qualname: str
 
 
-ReadRecord = tuple[tuple[str, str], tuple[str, str], bool, tuple[object, ...]]
-"""One stored event record: ``(stored, resolved, touched, built)``. *stored*
-and *resolved* are ``(module, qualname)`` identities. *touched* is ``True``
-when the migration table rewrote the record. *built* holds each field value
-that the migration added or replaced, as the object the event holds. A
-stored value that the migration kept is not in it."""
+class EventRead(NamedTuple):
+    """One stored event record that a read revived.
 
-DecodedValue = tuple[object, tuple[ReadRecord, ...]]
-"""One value that ``loads_typed`` returned, and the :data:`ReadRecord` of
-each stored event record that its decode read, in read order."""
+    *stored* and *resolved* are ``(module, qualname)`` identities. *touched*
+    is ``True`` when the migration table rewrote the record. *built* holds
+    each field value that the migration added or replaced, as the object
+    the event holds. A stored value that the migration kept is not in it.
+    *nested* counts the reads inside this record. They come just before it.
+    """
+
+    stored: tuple[str, str]
+    resolved: tuple[str, str]
+    touched: bool
+    built: tuple[object, ...]
+    nested: int
+
+
+StoredRead = EventRead | ValueRead
+
+
+"""One stored record that a read met: an event or a recorded value."""
+
+DecodedValue = tuple[object, tuple[StoredRead, ...]]
+"""One value that ``loads_typed`` returned, and the :data:`StoredRead` of
+each stored record that its decode read, in read order."""
 
 
 def _scan_identities(data: bytes) -> list[tuple[str, str]]:
@@ -357,8 +371,10 @@ def _make_ext_hook(
     tables: MigrationTables,
     scope: dict[tuple[str, str], type],
     *,
+    values: ValueReader,
     unresolved: list[UnrevivedIdentity] | None = None,
-    reads: list[ReadRecord] | None = None,
+    reads: list[StoredRead] | None = None,
+    encode: Callable[[object], tuple[str, bytes]] | None = None,
 ) -> Callable[[int, bytes], Any]:
     """Build an ext-hook that records revival errors into *errors*.
 
@@ -388,11 +404,17 @@ def _make_ext_hook(
 
     *reads*, when not ``None``, is a second collector. Every stored
     ``EXT_NAMESPACE_AWARE_EVENT`` record is appended to it as a
-    :data:`ReadRecord`, touched or not. Only
-    ``NamespaceAwareSerde._record_reads`` passes one.
+    :class:`EventRead`, touched or not, and each named value as a
+    :class:`ValueRead`. Only ``NamespaceAwareSerde._record_reads``
+    passes one.
+
+    *values* reads every record that LangGraph owns. With no move and
+    no *reads*, its hook is *fallback* itself.
     """
+    read_value = values.hook(fallback, reads, encode)
 
     def _ext_hook(code: int, data: bytes) -> object:
+        start = 0 if reads is None else len(reads)
         if code == EXT_INTERRUPT:
             # Inner unpack uses our hook so a nested EXT_NAMESPACE_AWARE_EVENT
             # inside ``value`` resolves back to its namespaced class.
@@ -444,14 +466,16 @@ def _make_ext_hook(
                 *ormsgpack.unpackb(
                     data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
                 ),
+                start=start,
                 reformat=True,
             )
         if code != EXT_NAMESPACE_AWARE_EVENT:
-            return fallback(code, data)
+            return read_value(code, data)
         return _revive(
             *ormsgpack.unpackb(
                 data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
             ),
+            start=start,
             reformat=False,
         )
 
@@ -460,6 +484,7 @@ def _make_ext_hook(
         qualname: str,
         kwargs: dict[str, Any],
         *,
+        start: int,
         reformat: bool,
     ) -> object:
         """Migrate and construct one stored event record. *reformat* says
@@ -497,7 +522,15 @@ def _make_ext_hook(
                     for name, value in kwargs.items()
                     if name not in before or before[name] is not value
                 )
-                reads.append((stored, (module_name, qualname), touched, built))
+                reads.append(
+                    EventRead(
+                        stored,
+                        (module_name, qualname),
+                        touched,
+                        built,
+                        len(reads) - start,
+                    )
+                )
             return instance
         except (ImportError, AttributeError, TypeError, _CallableError) as exc:
             # ``TypeError`` is the field-shape mismatch: the identity
@@ -603,6 +636,12 @@ class NamespaceAwareSerde(JsonPlusSerializer):
     graph it builds. Pass
     ``migrations=`` for hand-authored cross-module renames or composite
     operations; the two compose. See :mod:`langgraph_events.serde.migrations`.
+
+    ``channel_types`` maps each channel to its stored type, and ``values``
+    names a value class that no annotation reaches, for a field typed
+    ``Any`` or ``object``. Each reached enum, dataclass or pydantic model
+    is a stored identity. See 'Moving a value class' in
+    ``docs/event-migrations.md``.
     """
 
     def __init__(
@@ -611,6 +650,8 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         *,
         namespaces: Sequence[type] = (),
         events: Sequence[type] = (),
+        channel_types: Mapping[str, object] = MappingProxyType({}),
+        values: Sequence[type] = (),
         legacy_write: bool = False,
         **kwargs: Any,
     ) -> None:
@@ -622,33 +663,13 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         decorated, oldest_historic, scope = _collect_decorated_migrations(
             namespaces, events
         )
-        for event_cls, field, model in _unimportable_payload_models(scope.values()):
-            # The LangGraph serializer, which owns the pydantic ext code,
-            # stores a payload by ``__name__`` and revives it with one
-            # ``getattr`` on the module. Every failure path there returns
-            # the raw dump dict with no error. The event itself still
-            # constructs around that dict, so nothing downstream notices.
-            # Fail here, where the author can act (#167).
-            nested = "." in model.__qualname__
-            remedy = (
-                f"Move {model.__qualname__} to module scope in {model.__module__}."
-                if nested
-                else f"Bind it on module {model.__module__} under the name "
-                f"{model.__name__!r}. Alias a parametrized generic at module "
-                f"level, for example IntBox = Box[int]."
-            )
-            raise ValueError(
-                f"{event_cls.__qualname__}.{field} is annotated with pydantic "
-                f"model {model.__qualname__}. Its checkpoint identity "
-                f"{model.__module__}.{model.__name__} does not import. The "
-                f"LangGraph serializer stores a pydantic payload by __name__ "
-                f"and revives it with getattr on the module. On a miss it "
-                f"returns a raw dict with no error. {remedy}"
-            )
         # The legacy_write guards judge the client's tables only. lge's
         # framework migrations are never relabelled on write, so a framework
         # event is always written under its own live identity.
-        client = _flatten_and_validate((*decorated, *migrations), scope)
+        value_scope = ValueScope.reach(scope.values(), channel_types, values)
+        client = _flatten_and_validate(
+            (*decorated, *value_scope.decorated_moves(), *migrations), scope
+        )
         if legacy_write:
             client.refuse_legacy_write()
         self._client_tables = client
@@ -659,13 +680,15 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         # importing — see ``_resolve_identity``. ``_live_identities`` is its
         # key set: the identities revivable with no migration at all.
         self._scope = scope
+        self._value_scope = value_scope
+        self._value_reader = ValueReader.build(client.value_move_table)
         self._live_identities = frozenset(scope)
         self._legacy_write = legacy_write
         self._oldest_historic = oldest_historic
         self._tolerant_depth = 0
         self._unresolved: list[UnrevivedIdentity] | None = None
         self._record_depth = 0
-        self._reads: list[ReadRecord] | None = None
+        self._reads: list[StoredRead] | None = None
         self._decoded: list[DecodedValue] | None = None
         for cls in _unreachable_migrate_from_siblings(scope):
             warn_user(
@@ -675,6 +698,13 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                 f"historic identity will not revive. Nest it inside a "
                 f"Namespace passed via namespaces=, or pass it directly "
                 f"in events=.",
+                UnreachableMigrationWarning,
+            )
+        for cls in self._unreached_value_classes():
+            warn_user(
+                f"{cls.__qualname__} is decorated with @migrate_value_from, but "
+                f"no event field or channel type of this serde reaches it, so "
+                f"its move does nothing. Pass it in values=.",
                 UnreachableMigrationWarning,
             )
 
@@ -722,13 +752,14 @@ class NamespaceAwareSerde(JsonPlusSerializer):
     @contextlib.contextmanager
     def _record_reads(
         self, decoded: list[DecodedValue] | None = None
-    ) -> Iterator[list[ReadRecord]]:
-        """Collect every stored event record this serde reads, for the
-        duration of the ``with`` block.
+    ) -> Iterator[list[StoredRead]]:
+        """Collect every stored record this serde reads, for the duration
+        of the ``with`` block.
 
-        Yields a collector of :data:`ReadRecord` entries, one per stored
-        ``EXT_NAMESPACE_AWARE_EVENT`` record that revived, in read order,
-        wherever the record sat in the blob. A record that degraded to an
+        Yields a collector of :data:`StoredRead` entries. There is one
+        :class:`ValueRead` per named record of any class, and one
+        :class:`EventRead` per stored ``EXT_NAMESPACE_AWARE_EVENT`` record
+        that revived, wherever the record sat in the blob. A record that degraded to an
         :class:`UnrevivedIdentity` is not collected. The ``touched`` flag
         is ``True`` when the migration table changed the identity, or
         changed the kwargs to values that encode to other bytes. Then a
@@ -774,6 +805,25 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         return frozenset(
             Identity(*identity)
             for identity in self._live_identities | self._tables.rename_table.keys()
+        )
+
+    def value_identities(self) -> frozenset[ValueIdentity]:
+        """Each value class this serde reaches."""
+        return frozenset(self._value_scope.classes)
+
+    def _unreached_value_classes(self) -> list[type]:
+        """Each ``@migrate_value_from`` class that the walk does not reach."""
+        modules = {module for module, _qualname in self._scope}
+        return self._value_scope.unreached_siblings(modules)
+
+    def unreached_value_moves(self) -> tuple[ValueIdentity, ...]:
+        """The identity of each ``@migrate_value_from`` class that this serde
+        does not reach, so that its move does nothing."""
+        return tuple(
+            sorted(
+                ValueIdentity(cls.__module__, cls.__name__)
+                for cls in self._unreached_value_classes()
+            )
         )
 
     def live_fields(self) -> dict[Identity, frozenset[str]]:
@@ -849,8 +899,10 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                     self._unpack_ext_hook,
                     self._tables,
                     self._scope,
+                    values=self._value_reader,
                     unresolved=self._unresolved,
                     reads=self._reads,
+                    encode=self.dumps_typed if self._decoded is not None else None,
                 ),
                 option=ormsgpack.OPT_NON_STR_KEYS,
             )
